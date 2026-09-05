@@ -88,15 +88,18 @@ Current Codex Session
 ```text
 ROLE
 RUN_ID
+ATTEMPT_ID
 CHANGE
 CURRENT_STATE
+REQUEST_ARTIFACT
+APPROVAL_ARTIFACT
 ARTIFACT_PATHS
 BASE_SHA
 HEAD_SHA
 EXPECTED_OUTPUT
 ```
 
-Agent 根据 artifact 路径读取有限范围的项目事实。各 Agent 共享项目 filesystem；流程默认串行，不建立共享 task board 或 Agent 间直接通信。
+Agent 根据 artifact 路径读取有限范围的项目事实。`REQUEST_ARTIFACT` 是首次 Explore 的必需入口。各 Agent 共享项目 filesystem；流程默认串行，不建立共享 task board 或 Agent 间直接通信。
 
 ## 固定模型
 
@@ -128,6 +131,7 @@ Agent 根据 artifact 路径读取有限范围的项目事实。各 Agent 共享
 | `READY_TO_PUBLISH` | Orchestrator | 等待显式发布授权 |
 | `PUBLISHING` | Archivist / Publisher | archive、commit、push、sync 结果 |
 | `DONE` | 无 | Final SHA 与最终证据 |
+| `CANCELLED` | 无 | 取消原因 |
 | `BLOCKED` | 当前专业 Agent -> Orchestrator | blocker 证据 |
 | `NEEDS_HUMAN` | Orchestrator + Human | 人工决策与恢复状态 |
 
@@ -149,6 +153,40 @@ AUDITING --FAIL--> FIXING_IMPLEMENTATION --PASS--> AUDITING
 
 Proposal Review 与 Pre-Archive Audit 分别最多自动修订两轮；任一阶段第 3 次仍有 blocking finding 时进入 `NEEDS_HUMAN`。`BLOCKED` 不自动重试。
 
+完整路由由 state + event 决定：
+
+| Current state | Event | Next state |
+|---|---|---|
+| `NEW` | `START` | `EXPLORING` |
+| `EXPLORING` | `PASS` | `AWAITING_EXPLORE_APPROVAL` |
+| `AWAITING_EXPLORE_APPROVAL` | `APPROVE` | `PROPOSING` |
+| `AWAITING_EXPLORE_APPROVAL` | `REVISE` | `EXPLORING` |
+| `AWAITING_EXPLORE_APPROVAL` | `REJECT` | `CANCELLED` |
+| `PROPOSING` | `PASS` | `REVIEWING_PROPOSAL` |
+| `REVIEWING_PROPOSAL` | `PASS` | `APPLYING` |
+| `REVIEWING_PROPOSAL` | `FAIL`, attempt < 3 | `REVISING_PROPOSAL` |
+| `REVIEWING_PROPOSAL` | `FAIL`, attempt = 3 | `NEEDS_HUMAN` |
+| `REVISING_PROPOSAL` | `PASS` | `REVIEWING_PROPOSAL` |
+| `APPLYING` | `PASS` | `AUDITING` |
+| `APPLYING` | `PROPOSAL_CHANGED`, within approved scope | `REVIEWING_PROPOSAL` |
+| `APPLYING` | `PROPOSAL_CHANGED`, outside approved scope | `EXPLORING` |
+| `AUDITING` | `PASS`, publish authorized | `PUBLISHING` |
+| `AUDITING` | `PASS`, publish not authorized | `READY_TO_PUBLISH` |
+| `AUDITING` | `FAIL`, attempt < 3 | `FIXING_IMPLEMENTATION` |
+| `AUDITING` | `FAIL`, attempt = 3 | `NEEDS_HUMAN` |
+| `FIXING_IMPLEMENTATION` | `PASS` | `AUDITING` |
+| `READY_TO_PUBLISH` | `AUTHORIZE_PUBLISH` | `PUBLISHING` |
+| 任一 active state | `BLOCKED` | `BLOCKED`，保存 `resume_state` |
+| `BLOCKED` | `RESOLVED` | 已验证的 `resume_state` |
+| `NEEDS_HUMAN` | `RETRY_PROPOSAL` | `REVISING_PROPOSAL` |
+| `NEEDS_HUMAN` | `RETRY_IMPLEMENTATION` | `FIXING_IMPLEMENTATION` |
+| `NEEDS_HUMAN` | `RESOLVE_BLOCKER` | 已验证的 `resume_state` |
+| `NEEDS_HUMAN` | `REVISE_DIRECTION` | `EXPLORING` |
+| `NEEDS_HUMAN` | `CANCEL` | `CANCELLED` |
+| `PUBLISHING` | `STEP_PASS` | 下一个 publish step；全部完成后 `DONE` |
+
+任一专业 Agent 的 `BLOCKED` 都使用同一规则。Orchestrator 只有在 blocker 已有新证据证明解除后才能触发 `RESOLVED`。
+
 ## OpenSpec 调用边界
 
 `explore`、`propose` 和 `apply` 是 Agent workflow 语义，不是本机 OpenSpec CLI 子命令。Codex adapter 使用 CLI 原语执行：
@@ -164,7 +202,21 @@ Archive: openspec archive <change>
 
 ## Human Gate 与发布授权
 
-默认只有 Explore 结束后的一个主动 Human Gate。批准记录必须绑定 Explore Result 的 SHA-256 digest；结果被修改后，批准自动失效。
+Orchestrator 启动时先写入 `.agents/runs/<run-id>/request.md`，包含原始 request、来源链接、项目 realpath、创建时间和请求的发布模式。它只保存输入 provenance，不包含方案或任务，因此不是平行 spec。
+
+默认只有 Explore 结束后的一个主动 Human Gate。决策写入 `.agents/runs/<run-id>/approval.json`，至少包含：
+
+```text
+DECISION
+EXPLORE_DIGEST
+PROJECT_REALPATH
+BRANCH
+REMOTE_URL
+PUBLISH_AUTHORIZED
+DECIDED_AT
+```
+
+批准绑定 Explore Result 的 SHA-256 digest 以及 project/branch/remote 范围。结果或发布范围被修改后，批准自动失效。
 
 入口支持发布意图：
 
@@ -172,7 +224,7 @@ Archive: openspec archive <change>
 $openspec-dev-team <request> --publish
 ```
 
-`--publish` 表示用户已明确授权通过 Audit 后执行正常 archive、commit、push 和必要的 Linear sync。未指定时，流程停在 `READY_TO_PUBLISH`。额外 destructive 或 security-sensitive 操作仍需单独授权。
+`--publish` 表示用户请求在通过 Human Gate 和 Audit 后执行正常 archive、commit、push 和必要的 Linear sync；Human Gate 的批准将该授权及其 project/branch/remote 范围持久化。未指定时，流程停在 `READY_TO_PUBLISH`。额外 destructive 或 security-sensitive 操作仍需单独授权。
 
 ## Handoff contract
 
@@ -188,19 +240,41 @@ NEEDS_HUMAN
 最小字段：
 
 ```text
+RUN_ID
+ATTEMPT_ID
 STATUS
 CHANGE
+REQUEST_ARTIFACT
+APPROVAL_ARTIFACT
 SUMMARY
 EVIDENCE
 BLOCKERS
 ARTIFACTS
-CHANGE_DIGEST
+PROPOSAL_DIGEST
+PROGRESS_DIGEST
 BASE_SHA
 HEAD_SHA
+PUBLISH_STEP_RECEIPTS
 NEXT_STATE
 ```
 
-Proposal Reviewer 的 PASS 绑定 `CHANGE_DIGEST`。Auditor 的 PASS 同时绑定 `CHANGE_DIGEST`、`BASE_SHA` 和 `HEAD_SHA`。Publisher 必须确认三者仍一致；任何变化都会使旧 PASS 失效。
+`PROPOSAL_DIGEST` 覆盖 `openspec instructions apply` 所列的全部设计输入：proposal、design、delta specs 和 tasks。对 tasks 计算时只将 checkbox 状态统一规范化为未完成；任务文字、顺序或结构仍参与 digest。`PROGRESS_DIGEST` 则覆盖 tasks 原文，用于记录实际完成状态。
+
+Proposal Reviewer 的 PASS 绑定 `PROPOSAL_DIGEST`。正常勾选 task 只改变 `PROGRESS_DIGEST`，不会使 Proposal PASS 失效。Apply 中若 proposal、design、delta specs 或任务内容发生变化，必须返回 `REVIEWING_PROPOSAL`；若变化超出已批准 Explore Result 的范围，则返回 `EXPLORING` 并重新经过 Human Gate。
+
+Auditor 的 PASS 绑定 `PROPOSAL_DIGEST`、`PROGRESS_DIGEST`、`BASE_SHA`、`HEAD_SHA` 和非忽略 untracked baseline。Publisher 必须确认这些值仍一致。
+
+按阶段区分必填字段：
+
+| 阶段 | 额外必填字段 |
+|---|---|
+| Change 创建前 | `RUN_ID`、`ATTEMPT_ID`；`CHANGE` 和两个 digest 明确为 `null` |
+| Change 创建后 | `CHANGE`、`PROPOSAL_DIGEST` |
+| Apply 开始后 | `BASE_SHA`、`HEAD_SHA`、`PROGRESS_DIGEST` |
+| Human Gate 后 | `APPROVAL_ARTIFACT` 及其 digest |
+| Publishing | 当前 step、`ARCHIVE_DIGEST` 与已完成 step receipts |
+
+Orchestrator 只接受当前 `RUN_ID`、当前 `ATTEMPT_ID` 和预期 owner 返回的 handoff；迟到的旧 attempt 结果直接拒绝。
 
 测试证据只记录命令、exit code、时间和日志路径，不把完整日志复制进 handoff。
 
@@ -213,36 +287,57 @@ Proposal Reviewer 的 PASS 绑定 `CHANGE_DIGEST`。Auditor 的 PASS 同时绑�
 .agents/runs/<run-id>/
 ```
 
-Explore 时 Change 尚不存在，因此 state 使用稳定 `run-id` 命名。state 只保存当前阶段、重试次数、SHA、digest 和 artifact 路径，不保存需求、设计或 implementation plan。
+Explore 时 Change 尚不存在，因此 state 使用稳定 `run-id` 命名。state 保存当前阶段、当前 `ATTEMPT_ID`、重试次数、SHA、两个 digest、request/approval artifact、发布授权范围、publish step receipts 和其他 artifact 路径；不保存需求、设计或 implementation plan 正文。
 
-状态更新前必须验证 owner、必填字段、digest、SHA 和合法 `NEXT_STATE`，再原子写入。中断后从最后一个有效 handoff 继续；没有有效 handoff 时用 fresh context 重跑当前 attempt。
+专业 Agent 返回结构化 payload，由 Orchestrator 校验并落盘 handoff，再原子更新 state。中断后从最后一个有效 handoff 继续；普通阶段没有有效 handoff 时生成新的 `ATTEMPT_ID`，用 fresh context 重跑。
 
 ## Git 工作流
 
 整个流程直接在项目 `main` 串行执行，不使用 branch 或 worktree。
 
-- Apply 可产生 local commits，但不得 push。
+- Apply 必须用明确文件 allowlist 暂存并提交本次实现、测试和 task 进度，随后才能进入 Audit；不得 push。
 - 启动时记录 `BASE_SHA`。
 - 存在 staged 或 tracked dirty change 时进入 `NEEDS_HUMAN`。
-- 预先存在的 untracked 文件不阻塞，但不得被暂存、删除或覆盖。
+- 启动时记录非忽略 untracked baseline。预先存在的 untracked 文件不阻塞，但不得被暂存、删除或覆盖。
+- Audit 开始前要求 tracked 工作区和 index 干净，且不存在 baseline 之外的非忽略 untracked 文件；因此所有本次新增源码和测试都已包含在 `BASE_SHA..HEAD_SHA`。
 - 禁止 `git add .`、`git add -A`、force-push、reset、clean 和 history rewrite。
 - Publisher 只按明确 allowlist 暂存本次文件。
-- Publisher 开始前确认 branch、remote、Audit PASS、当前 HEAD 和 Change digest。
+- Publisher 开始前再次确认 tracked 工作区、index、非忽略 untracked 集合、branch、remote、Audit PASS、当前 HEAD 和两个 digest。
 - remote 或 main 状态异常时返回 `BLOCKED`，不自行 pull、merge 或 rebase。
 
 `using-git-worktrees` 不作为默认 skill。
+
+## Publishing 恢复
+
+`PUBLISHING` 不是普通 attempt，不能从头重跑。它按以下步骤执行，并在每个外部或不可重复动作后立即持久化 receipt：
+
+```text
+PREFLIGHT -> ARCHIVE -> VALIDATE -> FINAL_COMMIT -> PUSH -> LINEAR_SYNC -> COMPLETE
+```
+
+每个 receipt 至少记录 step、结果、时间、输入 digest 和产生的 path/SHA/remote response id。恢复时先核对实际状态，再只继续未完成步骤：
+
+- `ARCHIVE`：检查 active Change 与预期 archive path，已归档则复用结果。
+- `VALIDATE`：记录 archive 后 OpenSpec validation 结果。
+- `FINAL_COMMIT`：若 recorded final SHA 已存在且 tree 一致则复用，否则只提交预期 archive/spec 文件。
+- `PUSH`：查询 remote 是否已包含 final SHA；已存在则标记完成，不重复 push。
+- `LINEAR_SYNC`：先读取 issue 当前状态；已达到目标状态则标记完成。结果未知且无法安全判定时返回 `BLOCKED`，不盲目重复写入。
+
+Audit PASS 绑定 archive 前的 `HEAD_SHA` 和两个 digest。`ARCHIVE` 后计算 `ARCHIVE_DIGEST`，并确认从 audited HEAD 到 final commit 之间只包含 OpenSpec archive、living-spec sync 和发布证据 allowlist；业务代码变化会使 Audit PASS 失效并返回 `AUDITING`。最终 handoff 同时记录 audited HEAD、`ARCHIVE_DIGEST` 和 final SHA，明确承接关系。
 
 ## 权限边界
 
 | Agent | 写入范围 | GitHub / Linear |
 |---|---|---|
-| Explore / Proposal | 仅 OpenSpec Change | READ |
+| Explore / Proposal | Explore 阶段不写项目；Propose/修订阶段仅写 OpenSpec Change | READ |
 | Proposal Reviewer | READ ONLY | READ |
-| Apply Executor | 业务代码、测试、local commit | 无 WRITE |
-| Pre-Archive Auditor | READ ONLY | READ |
+| Apply Executor | 业务代码、测试、OpenSpec task 进度、local commit | 无 WRITE |
+| Pre-Archive Auditor | 不修改 tracked 文件；可写 `.agents/runs/` 日志和 ignored cache/build 输出 | READ |
 | Archivist / Publisher | archive、final commit、push、必要同步 | WRITE |
 
-Codex custom agent 可设置 model、reasoning、sandbox 与 MCP，但 sub-agent 会继承父 session 的部分权限。首版权限矩阵是行为约束；文档不得声称它提供了进程级 tool isolation。只读角色在 Codex profile 中显式使用 read-only sandbox。
+Explore、Reviewer 和 Auditor 返回结构化 payload，统一由 Orchestrator 写入 `.agents/runs/`。Auditor 必须独立重跑项目要求的 fresh quality gates，而非仅复述 Apply 证据；其命令只允许产生 ignored cache/build 输出和专用日志。若 gate 改动 tracked 文件或产生 baseline 外的非忽略文件，Audit 返回 `FAIL` 或 `BLOCKED`，不得自行修复。
+
+Codex custom agent 可设置 model、reasoning、sandbox 与 MCP，但 sub-agent 会继承父 session 的部分权限。首版权限矩阵是行为约束；文档不得声称它提供了进程级 tool isolation。Reviewer 使用 read-only sandbox；Auditor 因 fresh gates 需要受限 workspace write，但角色契约禁止修改 tracked 文件。
 
 ## Superpowers 使用
 
@@ -282,13 +377,15 @@ project/.agents/project.md
 2. 临时 fixture 覆盖 PASS、FAIL、两轮修复、`BLOCKED`、digest 失效、stale HEAD 和未授权 publish。
 3. `doctor.sh --global` 检查依赖、软链接、custom agents 和显式 model。
 4. `doctor.sh --project <path>` 检查 Git/OpenSpec root、project config、runtime ignore 和工作区状态。
-5. 对 `/Users/kaden/Vela` 做无写入 smoke test，确认识别 `main`、OpenSpec、quality gates、active changes 和现有 untracked 数据库文件；不得修改或推送 Vela。
+5. 在临时 OpenSpec 项目运行真实 Codex 调度 smoke test：主 session 依次加载 5 个 custom agents，验证显式 model/reasoning、fresh context、`RUN_ID`/`ATTEMPT_ID` handoff 接收，以及无发布授权时停止外部写入。Publisher 只执行未授权 preflight 并返回拒绝，不 archive、commit 或 push。
+6. 对 `/Users/kaden/Vela` 做无写入 smoke test，确认识别 `main`、OpenSpec、quality gates、active changes 和现有 untracked 数据库文件；不得修改或推送 Vela。
 
 ## 验收标准
 
 - `~/openspec-dev-team` 是独立 Git 项目。
 - `~/.codex/skills/openspec-dev-team` 在完成验证后指向项目内 skill。
 - Codex 能发现 5 个固定模型的 custom agents。
+- 临时项目的真实调度 smoke test 能证明 5 个角色可被当前 session 调用并返回当前 attempt 的合法 handoff。
 - Orchestrator 能从任意合法 state 派发唯一 owner，并拒绝非法 handoff。
 - 默认只有 Explore 后 Human Gate；无 `--publish` 时不发布。
 - OpenSpec 始终是唯一 lifecycle source of truth。
