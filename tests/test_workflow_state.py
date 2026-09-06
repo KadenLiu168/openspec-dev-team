@@ -1,8 +1,10 @@
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -23,9 +25,9 @@ class WorkflowStateTransitionTests(unittest.TestCase):
         state.update(values)
         self.state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
 
-    def transition(self, event):
+    def transition(self, event, *extra):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "transition", "--state", str(self.state_path), "--event", event],
+            [sys.executable, str(SCRIPT), "transition", "--state", str(self.state_path), "--event", event, *extra],
             text=True,
             capture_output=True,
         )
@@ -43,7 +45,12 @@ class WorkflowStateTransitionTests(unittest.TestCase):
         for state, event, extra, expected in cases:
             with self.subTest(state=state, event=event):
                 self.write_state(STATE=state, **extra)
-                result = self.transition(event)
+                if state == "BLOCKED":
+                    evidence = Path(self.temp.name) / "resolution.json"
+                    evidence.write_text("resolved", encoding="utf-8")
+                    result = self.transition(event, "--evidence", str(evidence))
+                else:
+                    result = self.transition(event)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], expected)
 
@@ -272,6 +279,203 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
                              "--result-file", str(complete_file))
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(len(json.loads(state_path.read_text(encoding="utf-8"))["PUBLISH_STEP_RECEIPTS"]), 7)
+
+class WorkflowStateFixRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.state_path = self.root / "state.json"
+        self.handoff_path = self.root / "handoff.json"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def invoke(self, *arguments):
+        return subprocess.run([sys.executable, str(SCRIPT), *arguments], text=True, capture_output=True)
+
+    def write_state(self, **values):
+        state = {"RUN_ID": "run-1", "STATE": "EXPLORING", "ATTEMPT_ID": "attempt-1"}
+        state.update(values)
+        self.state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+    def handoff(self, **overrides):
+        payload = {
+            "RUN_ID": "run-1", "ATTEMPT_ID": "attempt-1", "STATUS": "PASS",
+            "CHANGE": None, "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": None,
+            "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
+            "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None, "BASE_SHA": None,
+            "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
+            "OWNER": "Explore / Proposal",
+        }
+        payload.update(overrides)
+        self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def transition(self, event, handoff=True, *extra):
+        arguments = ["transition", "--state", str(self.state_path), "--event", event, *extra]
+        if handoff:
+            arguments.extend(["--handoff", str(self.handoff_path)])
+        return self.invoke(*arguments)
+
+    def assert_json_error_and_unchanged(self, result, before):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("error", json.loads(result.stderr))
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_present_malformed_handoff_never_bypasses_validation(self):
+        for payload in ({}, [], None):
+            with self.subTest(payload=payload):
+                self.write_state()
+                self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+                before = self.state_path.read_bytes()
+                self.assert_json_error_and_unchanged(self.transition("PASS"), before)
+
+    def test_status_must_match_event_before_routing(self):
+        self.write_state()
+        self.handoff(STATUS="FAIL")
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("PASS"), before)
+
+    def test_immutable_bindings_reject_mismatch_and_persist_to_state(self):
+        self.write_state(STATE="APPLYING", CHANGE="change", PROPOSAL_DIGEST="proposal-a",
+                         PROGRESS_DIGEST="progress-a", BASE_SHA="base-a", HEAD_SHA="head-a",
+                         APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval-a")
+        self.handoff(OWNER="Apply Executor", CHANGE="change", PROPOSAL_DIGEST="proposal-b",
+                     PROGRESS_DIGEST="progress-a", BASE_SHA="base-a", HEAD_SHA="head-a",
+                     APPROVAL_ARTIFACT="approval.json", NEXT_STATE="AUDITING")
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("PASS"), before)
+        self.handoff(OWNER="Apply Executor", CHANGE="change", PROPOSAL_DIGEST="proposal-a",
+                     PROGRESS_DIGEST="progress-a", BASE_SHA="base-a", HEAD_SHA="head-a",
+                     APPROVAL_ARTIFACT="approval.json", NEXT_STATE="AUDITING")
+        result = self.transition("PASS")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["PROPOSAL_DIGEST"], "proposal-a")
+        self.assertEqual(persisted["BASE_SHA"], "base-a")
+
+    def test_blocked_recovery_requires_evidence_and_valid_resume_state(self):
+        self.write_state(STATE="AUDITING")
+        self.assertEqual(self.transition("BLOCKED", False).returncode, 0)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["RESUME_STATE"], "AUDITING")
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("RESOLVED", False), before)
+        evidence = self.root / "resolution.json"
+        evidence.write_text("resolved", encoding="utf-8")
+        self.assertEqual(self.transition("RESOLVED", False, "--evidence", str(evidence)).returncode, 0)
+        self.write_state(STATE="BLOCKED", RESUME_STATE="NOT_A_STATE")
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("RESOLVED", False, "--evidence", str(evidence)), before)
+
+    def test_review_and_audit_failure_counts_are_separate(self):
+        self.write_state(STATE="AUDITING", ATTEMPT_COUNT=2, PROPOSAL_FAILURE_COUNT=2, AUDIT_FAILURE_COUNT=0)
+        result = self.transition("FAIL", False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "FIXING_IMPLEMENTATION")
+
+    def test_publishing_step_pass_only_completes_on_complete_step(self):
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval",
+                         PUBLISH_STEP_RECEIPTS=[])
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="PREFLIGHT", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=[{"STEP": "PREFLIGHT"}],
+                     NEXT_STATE="PUBLISHING")
+        self.assertEqual(self.transition("STEP_PASS").returncode, 0)
+        intermediate = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(intermediate["STATE"], "PUBLISHING")
+        self.assertEqual(intermediate["PUBLISH_STEP_RECEIPTS"], [{"STEP": "PREFLIGHT"}])
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval")
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="COMPLETE", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=[{"STEP": "COMPLETE"}],
+                     NEXT_STATE="DONE")
+        self.assertEqual(self.transition("STEP_PASS").returncode, 0)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "DONE")
+
+    def test_digest_normalizes_only_genuine_markers_and_input_order(self):
+        proposal, design, tasks = self.root / "proposal.md", self.root / "design.md", self.root / "tasks.md"
+        proposal.write_text("proposal\n", encoding="utf-8")
+        design.write_text("design\n", encoding="utf-8")
+        tasks.write_text("- [ ] task\nprose - [x] stays\n`- [x] inline`\n```\n- [x] code\n```\n", encoding="utf-8")
+        command = ("digest", "--input", str(proposal), "--input", str(design), "--tasks", str(tasks))
+        first = self.invoke(*command)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        reversed_inputs = self.invoke("digest", "--input", str(design), "--input", str(proposal), "--tasks", str(tasks))
+        self.assertEqual(json.loads(first.stdout), json.loads(reversed_inputs.stdout))
+        tasks.write_text("- [x] task\nprose - [ ] stays\n`- [x] inline`\n```\n- [x] code\n```\n", encoding="utf-8")
+        second = self.invoke(*command)
+        self.assertNotEqual(json.loads(first.stdout)["PROPOSAL_DIGEST"], json.loads(second.stdout)["PROPOSAL_DIGEST"])
+
+    def test_repeated_tasks_is_rejected_and_init_without_origin_succeeds(self):
+        task_one, task_two, proposal = self.root / "one.md", self.root / "two.md", self.root / "proposal.md"
+        task_one.write_text("- [ ] one\n", encoding="utf-8")
+        task_two.write_text("- [ ] two\n", encoding="utf-8")
+        proposal.write_text("proposal\n", encoding="utf-8")
+        result = self.invoke("digest", "--input", str(proposal), "--tasks", str(task_one), "--tasks", str(task_two))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("error", json.loads(result.stderr))
+        project = self.root / "no-origin"
+        project.mkdir()
+        for command in (("git", "init"), ("git", "config", "user.email", "test@example.com"),
+                        ("git", "config", "user.name", "Test User")):
+            subprocess.run(command, cwd=project, check=True, capture_output=True)
+        (project / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        subprocess.run(("git", "add", "tracked.txt"), cwd=project, check=True, capture_output=True)
+        subprocess.run(("git", "commit", "-m", "initial"), cwd=project, check=True, capture_output=True)
+        result = self.invoke("init", "--project", str(project), "--request", "request")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_path = Path(json.loads(result.stdout)["STATE_PATH"])
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["REMOTE_URL"], "")
+        receipt = self.root / "preflight.json"
+        receipt.write_text("preflight", encoding="utf-8")
+        state["STATE"] = "PUBLISHING"
+        state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        before = state_path.read_bytes()
+        result = self.invoke("publish-receipt", "--state", str(state_path), "--step", "PREFLIGHT",
+                             "--result-file", str(receipt))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state_path.read_bytes(), before)
+
+    def test_approve_rejects_tampered_review_bound_explore_result(self):
+        explore, request = self.root / "explore.md", self.root / "request.md"
+        explore.write_text("reviewed", encoding="utf-8")
+        request.write_text("request", encoding="utf-8")
+        self.write_state(STATE="AWAITING_EXPLORE_APPROVAL", REQUEST_ARTIFACT=str(request), PROJECT_REALPATH=str(self.root),
+                         BRANCH="main", REMOTE_URL="", EXPLORE_ARTIFACT=str(explore),
+                         EXPLORE_DIGEST=hashlib.sha256(explore.read_bytes()).hexdigest())
+        explore.write_text("tampered", encoding="utf-8")
+        before = self.state_path.read_bytes()
+        result = self.invoke("approve", "--state", str(self.state_path), "--decision", "APPROVE", "--explore-result", str(explore))
+        self.assert_json_error_and_unchanged(result, before)
+        self.assertFalse((self.root / "approval.json").exists())
+
+    def test_explore_handoff_persists_result_binding_for_approval(self):
+        explore = self.root / "explore.md"
+        explore.write_text("reviewed", encoding="utf-8")
+        self.write_state()
+        digest = hashlib.sha256(explore.read_bytes()).hexdigest()
+        self.handoff(EXPLORE_ARTIFACT=str(explore), EXPLORE_DIGEST=digest)
+        self.assertEqual(self.transition("PASS").returncode, 0)
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["EXPLORE_ARTIFACT"], str(explore))
+        self.assertEqual(saved["EXPLORE_DIGEST"], digest)
+
+    def test_uuid_attempt_and_inconsistent_receipt_preserve_state(self):
+        self.write_state(STATE="NEW", ATTEMPT_ID="old-attempt")
+        self.assertEqual(self.transition("START", False).returncode, 0)
+        uuid.UUID(json.loads(self.state_path.read_text(encoding="utf-8"))["ATTEMPT_ID"])
+        result_file = self.root / "result.json"
+        result_file.write_text("same", encoding="utf-8")
+        self.write_state(STATE="PUBLISHING", PUBLISH_STEP_RECEIPTS=[{
+            "STEP": "PREFLIGHT", "RESULT_FILE": str(result_file.resolve()),
+            "RESULT_DIGEST": hashlib.sha256(result_file.read_bytes()).hexdigest(),
+        }])
+        before = self.state_path.read_bytes()
+        result = self.invoke("publish-receipt", "--state", str(self.state_path), "--step", "PREFLIGHT",
+                             "--result-file", str(result_file), "--archive-digest", "different")
+        self.assert_json_error_and_unchanged(result, before)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,13 @@ PUBLISH_STEPS = ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LI
 SPECIALIST_OWNERS = {
     "Explore / Proposal", "Proposal Reviewer", "Apply Executor", "Pre-Archive Auditor", "Archivist / Publisher",
 }
+EVENT_STATUS = {"PASS": "PASS", "FAIL": "FAIL", "BLOCKED": "BLOCKED", "STEP_PASS": "PASS"}
+BINDING_FIELDS = (
+    "CHANGE", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
+    "APPROVAL_ARTIFACT", "APPROVAL_DIGEST", "UNTRACKED_BASELINE",
+    "EXPLORE_ARTIFACT", "EXPLORE_DIGEST",
+)
+RECOVERABLE_STATES = ACTIVE_STATES - {"BLOCKED", "NEEDS_HUMAN"}
 
 
 def fail(message):
@@ -92,6 +99,13 @@ def git_output(project, *arguments):
         stderr=subprocess.PIPE, check=True,
     )
     return result.stdout.strip()
+
+
+def optional_git_output(project, *arguments):
+    try:
+        return git_output(project, *arguments)
+    except subprocess.CalledProcessError:
+        return ""
 
 
 def sha256_file(path):
@@ -131,8 +145,12 @@ def next_state(state, event):
     return fixed.get((state, event))
 
 
-def target_for(state, event):
+def target_for(state, event, handoff=None):
     current = state.get("STATE")
+    if current == "PUBLISHING" and event == "STEP_PASS":
+        if not handoff:
+            return None
+        return "DONE" if handoff.get("PUBLISH_STEP") == "COMPLETE" else "PUBLISHING"
     target = next_state(current, event)
     if current in {"BLOCKED", "NEEDS_HUMAN"} and event in {"RESOLVED", "RESOLVE_BLOCKER"}:
         return state.get("RESUME_STATE")
@@ -147,6 +165,8 @@ def target_for(state, event):
 
 
 def validate_handoff(state, payload, event):
+    if not isinstance(payload, dict):
+        raise ValueError("handoff must be a JSON object")
     missing = [field for field in HANDOFF_FIELDS if field not in payload]
     if missing:
         raise ValueError("missing handoff fields: %s" % ",".join(missing))
@@ -156,11 +176,13 @@ def validate_handoff(state, payload, event):
         raise ValueError("stale ATTEMPT_ID")
     if payload.get("STATUS") not in VALID_STATUSES:
         raise ValueError("invalid STATUS")
+    if event not in EVENT_STATUS or payload.get("STATUS") != EVENT_STATUS[event]:
+        raise ValueError("STATUS does not match event")
     current = state.get("STATE")
     expected_owner = OWNER_BY_STATE.get(current)
     if expected_owner is None or payload.get("OWNER") != expected_owner:
         raise ValueError("wrong owner")
-    target = target_for(state, event)
+    target = target_for(state, event, payload)
     if not target or payload.get("NEXT_STATE") != target:
         raise ValueError("illegal NEXT_STATE")
     for requirement in REQUIRED_BY_STATE.get(current, ()):
@@ -185,11 +207,38 @@ def validate_handoff(state, payload, event):
                     raise ValueError("missing %s" % field)
             if not payload.get("PUBLISH_STEP_RECEIPTS"):
                 raise ValueError("missing PUBLISH_STEP_RECEIPTS")
+            if payload["PUBLISH_STEP"] not in PUBLISH_STEPS:
+                raise ValueError("invalid PUBLISH_STEP")
+    for field in BINDING_FIELDS:
+        if state.get(field) is not None and payload.get(field) is not None and payload.get(field) != state[field]:
+            raise ValueError("mismatched %s" % field)
+    if current == "AUDITING" and state.get("UNTRACKED_BASELINE") is not None:
+        if payload.get("UNTRACKED_BASELINE") != state["UNTRACKED_BASELINE"]:
+            raise ValueError("mismatched UNTRACKED_BASELINE")
 
 
 def validate_handoff_command(args):
     validate_handoff(read_json(args.state), read_json(args.handoff), args.event)
     print(json.dumps({"valid": True}, sort_keys=True))
+
+
+def normalize_task_checkboxes(content):
+    lines = content.decode("utf-8").splitlines(keepends=True)
+    normalized = []
+    in_fence = False
+    for line in lines:
+        stripped = line.lstrip(" \t")
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            normalized.append(line)
+            continue
+        if not in_fence and len(stripped) >= 5 and stripped[0] in "-*+" and stripped[1:3] == " [":
+            if stripped[3] in "xX" and stripped[4] == "]" and (len(stripped) == 5 or stripped[5].isspace()):
+                prefix = line[:len(line) - len(stripped)]
+                normalized.append(prefix + stripped[:3] + " " + stripped[4:])
+                continue
+        normalized.append(line)
+    return "".join(normalized).encode("utf-8")
 
 
 def digest_bytes(paths, tasks, normalize_tasks):
@@ -199,7 +248,7 @@ def digest_bytes(paths, tasks, normalize_tasks):
     for path in resolved:
         content = path.read_bytes()
         if normalize_tasks and path == tasks:
-            content = content.replace(b"- [x]", b"- [ ]").replace(b"- [X]", b"- [ ]")
+            content = normalize_task_checkboxes(content)
         digest.update(path.relative_to(common_parent).as_posix().encode("utf-8"))
         digest.update(b"\0")
         digest.update(content)
@@ -208,7 +257,9 @@ def digest_bytes(paths, tasks, normalize_tasks):
 
 
 def digest_command(args):
-    tasks = Path(args.tasks).resolve()
+    if len(args.tasks) != 1:
+        raise ValueError("exactly one --tasks is required")
+    tasks = Path(args.tasks[0]).resolve()
     inputs = [Path(path).resolve() for path in args.input]
     if tasks in inputs:
         raise ValueError("--tasks must not also be an --input")
@@ -229,7 +280,8 @@ def init_command(args):
     request_path = run_dir / "request.md"
     baseline = git_output(project, "ls-files", "--others", "--exclude-standard").splitlines()
     branch = git_output(project, "branch", "--show-current")
-    remote_url = git_output(project, "remote", "get-url", "origin")
+    remotes = git_output(project, "remote").splitlines()
+    remote_url = optional_git_output(project, "remote", "get-url", remotes[0]) if remotes else ""
     base_sha = git_output(project, "rev-parse", "HEAD")
     run_dir.mkdir(parents=True, exist_ok=True)
     request_path.write_text(
@@ -267,11 +319,17 @@ def approve_command(args):
     result_path = Path(args.explore_result)
     if not result_path.is_file():
         raise ValueError("Explore result does not exist")
+    result_path = result_path.resolve()
+    result_digest = sha256_file(result_path)
+    if state.get("EXPLORE_ARTIFACT") and Path(state["EXPLORE_ARTIFACT"]).resolve() != result_path:
+        raise ValueError("Explore result path differs from reviewed artifact")
+    if state.get("EXPLORE_DIGEST") and state["EXPLORE_DIGEST"] != result_digest:
+        raise ValueError("Explore result digest differs from reviewed artifact")
     approval_path = Path(state["REQUEST_ARTIFACT"]).parent / "approval.json"
     approved = args.decision == "APPROVE"
     approval = {
         "DECISION": args.decision,
-        "EXPLORE_DIGEST": sha256_file(result_path),
+        "EXPLORE_DIGEST": result_digest,
         "PROJECT_REALPATH": state["PROJECT_REALPATH"],
         "BRANCH": state["BRANCH"],
         "REMOTE_URL": state["REMOTE_URL"],
@@ -290,6 +348,8 @@ def approve_command(args):
 def publish_receipt_command(args):
     state_path = Path(args.state)
     state = read_json(state_path)
+    if state.get("REMOTE_URL") == "":
+        raise ValueError("publishing requires a configured remote")
     result_path = Path(args.result_file).resolve()
     if not result_path.is_file():
         raise ValueError("result file does not exist")
@@ -334,21 +394,41 @@ def publish_receipt_command(args):
     print(json.dumps(state, sort_keys=True))
 
 
+def validate_recovery(state, event, evidence_path):
+    if event == "RESOLVED":
+        if state.get("STATE") != "BLOCKED":
+            raise ValueError("RESOLVED is only valid from BLOCKED")
+    elif event == "RESOLVE_BLOCKER":
+        if state.get("STATE") != "NEEDS_HUMAN":
+            raise ValueError("RESOLVE_BLOCKER is only valid from NEEDS_HUMAN")
+    else:
+        return None
+    if state.get("RESUME_STATE") not in RECOVERABLE_STATES:
+        raise ValueError("invalid resume_state")
+    if not evidence_path or not Path(evidence_path).is_file():
+        raise ValueError("fresh blocker-resolution evidence is required")
+    evidence_path = Path(evidence_path).resolve()
+    return {"PATH": str(evidence_path), "DIGEST": sha256_file(evidence_path)}
+
+
 def transition(args):
     path = Path(args.state)
     state = read_json(path)
     current = state.get("STATE")
     event = args.event
-    handoff = read_json(args.handoff) if args.handoff else None
-    if handoff:
+    handoff = read_json(args.handoff) if args.handoff is not None else None
+    if args.handoff is not None:
         validate_handoff(state, handoff, event)
-    target = target_for(state, event)
+    recovery = validate_recovery(state, event, args.evidence)
+    target = target_for(state, event, handoff)
     if current == "BLOCKED" and event == "RESOLVED":
         target = state.get("RESUME_STATE")
     elif current == "NEEDS_HUMAN" and event == "RESOLVE_BLOCKER":
         target = state.get("RESUME_STATE")
     elif current in {"REVIEWING_PROPOSAL", "AUDITING"} and event == "FAIL":
-        count = state.get("ATTEMPT_COUNT", 0) + 1
+        counter = "PROPOSAL_FAILURE_COUNT" if current == "REVIEWING_PROPOSAL" else "AUDIT_FAILURE_COUNT"
+        count = state.get(counter, state.get("ATTEMPT_COUNT", 0)) + 1
+        state[counter] = count
         state["ATTEMPT_COUNT"] = count
         target = "NEEDS_HUMAN" if count >= 3 else (
             "REVISING_PROPOSAL" if current == "REVIEWING_PROPOSAL" else "FIXING_IMPLEMENTATION"
@@ -359,9 +439,20 @@ def transition(args):
         raise ValueError("illegal event %s for state %s" % (event, current))
     if event == "BLOCKED":
         state["RESUME_STATE"] = current
-    if handoff:
+    if recovery:
+        state["RESOLUTION_EVIDENCE"] = recovery
+    if args.handoff is not None:
         state.setdefault("HANDOFFS", []).append(handoff)
+        for field in BINDING_FIELDS:
+            if handoff.get(field) is not None:
+                state[field] = handoff[field]
+        if current == "PUBLISHING" and event == "STEP_PASS":
+            state["PUBLISH_STEP_RECEIPTS"] = handoff["PUBLISH_STEP_RECEIPTS"]
     state["STATE"] = target
+    if current == "REVIEWING_PROPOSAL" and event == "PASS":
+        state["PROPOSAL_FAILURE_COUNT"] = 0
+    if current == "APPLYING" and event == "PASS":
+        state["AUDIT_FAILURE_COUNT"] = 0
     if OWNER_BY_STATE.get(target) in SPECIALIST_OWNERS:
         state["ATTEMPT_ID"] = str(uuid.uuid4())
     atomic_write(path, state)
@@ -375,6 +466,7 @@ def main():
     transition_parser.add_argument("--state", required=True)
     transition_parser.add_argument("--event", required=True)
     transition_parser.add_argument("--handoff")
+    transition_parser.add_argument("--evidence")
     transition_parser.set_defaults(handler=transition)
     handoff_parser = commands.add_parser("validate-handoff")
     handoff_parser.add_argument("--state", required=True)
@@ -383,7 +475,7 @@ def main():
     handoff_parser.set_defaults(handler=validate_handoff_command)
     digest_parser = commands.add_parser("digest")
     digest_parser.add_argument("--input", action="append", required=True)
-    digest_parser.add_argument("--tasks", required=True)
+    digest_parser.add_argument("--tasks", action="append", required=True)
     digest_parser.set_defaults(handler=digest_command)
     init_parser = commands.add_parser("init")
     init_parser.add_argument("--project", required=True)
