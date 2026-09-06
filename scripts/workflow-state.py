@@ -38,7 +38,7 @@ OWNER_BY_STATE = {
 }
 
 REQUIRED_BY_STATE = {
-    "EXPLORING": ("PRE_CHANGE",),
+    "EXPLORING": ("PRE_CHANGE", "EXPLORE_BINDING"),
     "PROPOSING": ("POST_CHANGE", "HUMAN_GATE"),
     "REVIEWING_PROPOSAL": ("POST_CHANGE", "HUMAN_GATE"),
     "REVISING_PROPOSAL": ("POST_CHANGE", "HUMAN_GATE"),
@@ -52,7 +52,7 @@ HANDOFF_FIELDS = (
     "RUN_ID", "ATTEMPT_ID", "STATUS", "CHANGE", "REQUEST_ARTIFACT",
     "APPROVAL_ARTIFACT", "SUMMARY", "EVIDENCE", "BLOCKERS", "ARTIFACTS",
     "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
-    "PUBLISH_STEP_RECEIPTS", "NEXT_STATE",
+    "PUBLISH_STEP_RECEIPTS", "NEXT_STATE", "EXPLORE_ARTIFACT", "EXPLORE_DIGEST",
 )
 
 VALID_STATUSES = {"PASS", "FAIL", "BLOCKED", "NEEDS_HUMAN"}
@@ -145,6 +145,37 @@ def next_state(state, event):
     return fixed.get((state, event))
 
 
+def failure_target(state, current):
+    counter = "PROPOSAL_FAILURE_COUNT" if current == "REVIEWING_PROPOSAL" else "AUDIT_FAILURE_COUNT"
+    count = state.get(counter, state.get("ATTEMPT_COUNT", 0)) + 1
+    if count >= 3:
+        return count, "NEEDS_HUMAN"
+    return count, "REVISING_PROPOSAL" if current == "REVIEWING_PROPOSAL" else "FIXING_IMPLEMENTATION"
+
+
+def validate_receipt_sequence(receipts):
+    if not isinstance(receipts, list):
+        raise ValueError("PUBLISH_STEP_RECEIPTS must be a list")
+    if len(receipts) > len(PUBLISH_STEPS):
+        raise ValueError("too many publish receipts")
+    for index, receipt in enumerate(receipts):
+        if not isinstance(receipt, dict) or receipt.get("STEP") != PUBLISH_STEPS[index]:
+            raise ValueError("publish receipt step is out of order")
+
+
+def validate_receipt_progression(existing, proposed, step):
+    validate_receipt_sequence(existing)
+    validate_receipt_sequence(proposed)
+    if proposed == existing:
+        if not existing or existing[-1].get("STEP") != step:
+            raise ValueError("publish receipt progression is inconsistent")
+        return
+    if len(proposed) != len(existing) + 1 or proposed[:-1] != existing:
+        raise ValueError("publish receipt progression is inconsistent")
+    if step != PUBLISH_STEPS[len(existing)] or proposed[-1].get("STEP") != step:
+        raise ValueError("publish receipt step is out of order")
+
+
 def target_for(state, event, handoff=None):
     current = state.get("STATE")
     if current == "PUBLISHING" and event == "STEP_PASS":
@@ -155,10 +186,7 @@ def target_for(state, event, handoff=None):
     if current in {"BLOCKED", "NEEDS_HUMAN"} and event in {"RESOLVED", "RESOLVE_BLOCKER"}:
         return state.get("RESUME_STATE")
     if current in {"REVIEWING_PROPOSAL", "AUDITING"} and event == "FAIL":
-        count = state.get("ATTEMPT_COUNT", 0) + 1
-        if count >= 3:
-            return "NEEDS_HUMAN"
-        return "REVISING_PROPOSAL" if current == "REVIEWING_PROPOSAL" else "FIXING_IMPLEMENTATION"
+        return failure_target(state, current)[1]
     if current == "AUDITING" and event == "PASS":
         return "PUBLISHING" if state.get("PUBLISH_AUTHORIZED") else "READY_TO_PUBLISH"
     return target
@@ -190,6 +218,11 @@ def validate_handoff(state, payload, event):
             for field in ("CHANGE", "PROPOSAL_DIGEST", "PROGRESS_DIGEST"):
                 if payload.get(field) is not None:
                     raise ValueError("%s must be null before Change creation" % field)
+        elif requirement == "EXPLORE_BINDING":
+            artifact = payload.get("EXPLORE_ARTIFACT")
+            digest = payload.get("EXPLORE_DIGEST")
+            if not artifact or not digest or not Path(artifact).is_file() or sha256_file(artifact) != digest:
+                raise ValueError("missing or invalid Explore binding")
         elif requirement == "POST_CHANGE":
             for field in ("CHANGE", "PROPOSAL_DIGEST"):
                 if not payload.get(field):
@@ -209,6 +242,9 @@ def validate_handoff(state, payload, event):
                 raise ValueError("missing PUBLISH_STEP_RECEIPTS")
             if payload["PUBLISH_STEP"] not in PUBLISH_STEPS:
                 raise ValueError("invalid PUBLISH_STEP")
+            validate_receipt_progression(
+                state.get("PUBLISH_STEP_RECEIPTS", []), payload["PUBLISH_STEP_RECEIPTS"], payload["PUBLISH_STEP"],
+            )
     for field in BINDING_FIELDS:
         if state.get(field) is not None and payload.get(field) is not None and payload.get(field) != state[field]:
             raise ValueError("mismatched %s" % field)
@@ -321,15 +357,17 @@ def approve_command(args):
         raise ValueError("Explore result does not exist")
     result_path = result_path.resolve()
     result_digest = sha256_file(result_path)
-    if state.get("EXPLORE_ARTIFACT") and Path(state["EXPLORE_ARTIFACT"]).resolve() != result_path:
+    if not state.get("EXPLORE_ARTIFACT") or not state.get("EXPLORE_DIGEST"):
+        raise ValueError("accepted Explore binding is required")
+    if Path(state["EXPLORE_ARTIFACT"]).resolve() != result_path:
         raise ValueError("Explore result path differs from reviewed artifact")
-    if state.get("EXPLORE_DIGEST") and state["EXPLORE_DIGEST"] != result_digest:
+    if state["EXPLORE_DIGEST"] != result_digest:
         raise ValueError("Explore result digest differs from reviewed artifact")
     approval_path = Path(state["REQUEST_ARTIFACT"]).parent / "approval.json"
     approved = args.decision == "APPROVE"
     approval = {
         "DECISION": args.decision,
-        "EXPLORE_DIGEST": result_digest,
+        "EXPLORE_DIGEST": state["EXPLORE_DIGEST"],
         "PROJECT_REALPATH": state["PROJECT_REALPATH"],
         "BRANCH": state["BRANCH"],
         "REMOTE_URL": state["REMOTE_URL"],
@@ -355,6 +393,7 @@ def publish_receipt_command(args):
         raise ValueError("result file does not exist")
     result_digest = sha256_file(result_path)
     receipts = state.setdefault("PUBLISH_STEP_RECEIPTS", [])
+    validate_receipt_sequence(receipts)
     step = args.step
     existing = next((item for item in receipts if item["STEP"] == step), None)
     if existing:
@@ -371,8 +410,6 @@ def publish_receipt_command(args):
         return
     if state.get("STATE") != "PUBLISHING":
         raise ValueError("publish receipts require PUBLISHING")
-    if step not in PUBLISH_STEPS or len(receipts) >= len(PUBLISH_STEPS) or step != PUBLISH_STEPS[len(receipts)]:
-        raise ValueError("publish receipt step is out of order")
     receipt = {
         "STEP": step,
         "RESULT_FILE": str(result_path),
@@ -387,6 +424,7 @@ def publish_receipt_command(args):
         receipt["ARCHIVE_DIGEST"] = args.archive_digest
     if args.final_sha:
         receipt["FINAL_SHA"] = args.final_sha
+    validate_receipt_progression(receipts, receipts + [receipt], step)
     receipts.append(receipt)
     if step == "COMPLETE":
         state["STATE"] = "DONE"
@@ -427,12 +465,9 @@ def transition(args):
         target = state.get("RESUME_STATE")
     elif current in {"REVIEWING_PROPOSAL", "AUDITING"} and event == "FAIL":
         counter = "PROPOSAL_FAILURE_COUNT" if current == "REVIEWING_PROPOSAL" else "AUDIT_FAILURE_COUNT"
-        count = state.get(counter, state.get("ATTEMPT_COUNT", 0)) + 1
+        count, target = failure_target(state, current)
         state[counter] = count
         state["ATTEMPT_COUNT"] = count
-        target = "NEEDS_HUMAN" if count >= 3 else (
-            "REVISING_PROPOSAL" if current == "REVIEWING_PROPOSAL" else "FIXING_IMPLEMENTATION"
-        )
     elif current == "AUDITING" and event == "PASS":
         target = "PUBLISHING" if state.get("PUBLISH_AUTHORIZED") else "READY_TO_PUBLISH"
     if not target:

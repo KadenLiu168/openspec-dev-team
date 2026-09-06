@@ -67,6 +67,8 @@ class WorkflowStateHandoffTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.state_path = Path(self.temp.name) / "state.json"
         self.handoff_path = Path(self.temp.name) / "handoff.json"
+        self.explore_path = Path(self.temp.name) / "explore.md"
+        self.explore_path.write_text("explore", encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -85,6 +87,8 @@ class WorkflowStateHandoffTests(unittest.TestCase):
             "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None, "BASE_SHA": None,
             "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
             "OWNER": "Explore / Proposal",
+            "EXPLORE_ARTIFACT": str(self.explore_path),
+            "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
         }
         value.update(overrides)
         self.handoff_path.write_text(json.dumps(value), encoding="utf-8")
@@ -181,10 +185,15 @@ class WorkflowStateDigestTests(unittest.TestCase):
 
     def test_checkbox_progress_does_not_change_proposal_digest(self):
         before = self.digest()
+        self.assertEqual(before["PROGRESS_DIGEST"], hashlib.sha256(self.tasks.read_bytes()).hexdigest())
         self.tasks.write_text("- [x] first task\n", encoding="utf-8")
         after = self.digest()
         self.assertEqual(before["PROPOSAL_DIGEST"], after["PROPOSAL_DIGEST"])
         self.assertNotEqual(before["PROGRESS_DIGEST"], after["PROGRESS_DIGEST"])
+        self.assertEqual(after["PROGRESS_DIGEST"], hashlib.sha256(self.tasks.read_bytes()).hexdigest())
+        self.tasks.write_bytes(b"- [ ] caf\xc3\xa9")
+        raw = self.digest()
+        self.assertEqual(raw["PROGRESS_DIGEST"], hashlib.sha256(b"- [ ] caf\xc3\xa9").hexdigest())
 
     def test_task_text_and_design_change_proposal_digest(self):
         before = self.digest()
@@ -238,10 +247,14 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
         self.assertIn(persisted["BRANCH"], request)
         self.assertIn(persisted["REMOTE_URL"], request)
 
-        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "START").returncode, 0)
-        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "PASS").returncode, 0)
         explore = self.project / "explore.md"
         explore.write_text("Explore result\n", encoding="utf-8")
+        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "START").returncode, 0)
+        exploring = json.loads(state_path.read_text(encoding="utf-8"))
+        exploring["EXPLORE_ARTIFACT"] = str(explore)
+        exploring["EXPLORE_DIGEST"] = hashlib.sha256(explore.read_bytes()).hexdigest()
+        state_path.write_text(json.dumps(exploring, sort_keys=True), encoding="utf-8")
+        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "PASS").returncode, 0)
         result = self.invoke("approve", "--state", str(state_path), "--decision", "APPROVE",
                              "--explore-result", str(explore), "--publish-authorized")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -286,6 +299,8 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.state_path = self.root / "state.json"
         self.handoff_path = self.root / "handoff.json"
+        self.explore_path = self.root / "explore.md"
+        self.explore_path.write_text("explore", encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -306,6 +321,8 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
             "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None, "BASE_SHA": None,
             "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
             "OWNER": "Explore / Proposal",
+            "EXPLORE_ARTIFACT": str(self.explore_path),
+            "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
         }
         payload.update(overrides)
         self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -334,6 +351,35 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         self.handoff(STATUS="FAIL")
         before = self.state_path.read_bytes()
         self.assert_json_error_and_unchanged(self.transition("PASS"), before)
+
+    def test_explore_pass_and_approval_require_accepted_binding(self):
+        self.write_state()
+        self.handoff(EXPLORE_ARTIFACT=None, EXPLORE_DIGEST=None)
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("PASS"), before)
+
+        result = self.root / "result.md"
+        request = self.root / "request.md"
+        result.write_text("result", encoding="utf-8")
+        request.write_text("request", encoding="utf-8")
+        self.write_state(STATE="AWAITING_EXPLORE_APPROVAL", REQUEST_ARTIFACT=str(request),
+                         PROJECT_REALPATH=str(self.root), BRANCH="main", REMOTE_URL="")
+        before = self.state_path.read_bytes()
+        approval = self.invoke("approve", "--state", str(self.state_path), "--decision", "APPROVE",
+                               "--explore-result", str(result))
+        self.assert_json_error_and_unchanged(approval, before)
+        self.assertFalse((self.root / "approval.json").exists())
+
+    def test_audit_fail_handoff_uses_audit_counter_not_proposal_counter(self):
+        self.write_state(STATE="AUDITING", ATTEMPT_COUNT=2, PROPOSAL_FAILURE_COUNT=2, AUDIT_FAILURE_COUNT=0,
+                         CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json")
+        self.handoff(OWNER="Pre-Archive Auditor", STATUS="FAIL", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+                     APPROVAL_ARTIFACT="approval.json", NEXT_STATE="FIXING_IMPLEMENTATION")
+        result = self.transition("FAIL")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "FIXING_IMPLEMENTATION")
 
     def test_immutable_bindings_reject_mismatch_and_persist_to_state(self):
         self.write_state(STATE="APPLYING", CHANGE="change", PROPOSAL_DIGEST="proposal-a",
@@ -384,14 +430,48 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         intermediate = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(intermediate["STATE"], "PUBLISHING")
         self.assertEqual(intermediate["PUBLISH_STEP_RECEIPTS"], [{"STEP": "PREFLIGHT"}])
+        complete_prefix = [{"STEP": step} for step in ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LINEAR_SYNC")]
         self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
-                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval")
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval",
+                         PUBLISH_STEP_RECEIPTS=complete_prefix)
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="COMPLETE", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=complete_prefix + [{"STEP": "COMPLETE"}],
+                     NEXT_STATE="DONE")
+        self.assertEqual(self.transition("STEP_PASS").returncode, 0)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "DONE")
+
+    def test_step_pass_rejects_forged_completion_and_accepts_contiguous_completion(self):
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=[])
         self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
                      PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
                      PUBLISH_STEP="COMPLETE", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=[{"STEP": "COMPLETE"}],
                      NEXT_STATE="DONE")
+        before = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("STEP_PASS"), before)
+
+        prefix = [{"STEP": step} for step in ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LINEAR_SYNC")]
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=prefix)
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="COMPLETE", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=prefix + [{"STEP": "COMPLETE"}],
+                     NEXT_STATE="DONE")
         self.assertEqual(self.transition("STEP_PASS").returncode, 0)
         self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "DONE")
+
+    def test_step_pass_replays_an_identical_persisted_receipt(self):
+        receipts = [{"STEP": "PREFLIGHT"}]
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=receipts)
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="PREFLIGHT", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=receipts,
+                     NEXT_STATE="PUBLISHING")
+        result = self.transition("STEP_PASS")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["PUBLISH_STEP_RECEIPTS"], receipts)
 
     def test_digest_normalizes_only_genuine_markers_and_input_order(self):
         proposal, design, tasks = self.root / "proposal.md", self.root / "design.md", self.root / "tasks.md"
