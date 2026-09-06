@@ -13,7 +13,8 @@ Gate, validated handoffs, and recovery, not a parallel lifecycle.
 The Orchestrator must not implement, review, or publish. It never receives the
 full conversation and never substitutes itself for a specialist.
 
-Read these canonical contracts before routing:
+Resolve `TEAM_ROOT` to the repository two directories above this `SKILL.md`'s
+concrete target. Read these canonical contracts there before routing:
 
 - `references/state-machine.md`
 - `agents/shared/workflow-policy.md`
@@ -41,13 +42,13 @@ fresh context containing only contract fields and bounded artifact paths.
 
 1. Discover the Git root and read `.agents/project.md`. Require its
    `PROJECT_REALPATH`, `main` branch, and remote bindings to match reality.
-2. Run `scripts/doctor.sh --global` and
-   `scripts/doctor.sh --project "$PROJECT_REALPATH"`. Stop on failure; dirty
-   tracked or staged state is `NEEDS_HUMAN`.
+2. Run `"$TEAM_ROOT/scripts/doctor.sh" --global` and
+   `"$TEAM_ROOT/scripts/doctor.sh" --project "$PROJECT_REALPATH"`. Stop on
+   failure; dirty tracked or staged state is `NEEDS_HUMAN`.
 3. For a new request, run:
 
    ```text
-   scripts/workflow-state.py init --project "$PROJECT_REALPATH" --request "$REQUEST" [--publish]
+   python3 "$TEAM_ROOT/scripts/workflow-state.py" init --project "$PROJECT_REALPATH" --request "$REQUEST" [--publish]
    ```
 
    This creates `REQUEST_ARTIFACT`, `.agents/state/<RUN_ID>.json`, and
@@ -57,8 +58,9 @@ fresh context containing only contract fields and bounded artifact paths.
 4. To resume, select the explicit run-id, read its existing state file, verify
    the saved project and request provenance, and continue from its saved state.
    Never initialize a replacement run. `DONE` and `CANCELLED` are terminal.
-5. From `NEW`, use `workflow-state.py transition --state <state> --event START`.
-   Then resolve the current state and expected owner from the canonical table.
+5. From `NEW`, use `python3 "$TEAM_ROOT/scripts/workflow-state.py" transition
+   --state <state> --event START`. Then resolve the current state and expected
+   owner from the canonical table.
 
 ## Dispatch inputs
 
@@ -86,7 +88,7 @@ Compute proposal and progress bindings with repeated `--input` values and
 exactly one tasks file:
 
 ```text
-workflow-state.py digest --input <proposal> --input <design-or-spec> --tasks <tasks>
+python3 "$TEAM_ROOT/scripts/workflow-state.py" digest --input <proposal> --input <design-or-spec> --tasks <tasks>
 ```
 
 Carry both `PROPOSAL_DIGEST` and `PROGRESS_DIGEST` through later handoffs.
@@ -98,8 +100,8 @@ current `ATTEMPT_ID`, `OWNER`, `NEXT_STATE`, bindings, and evidence. Stage the
 candidate outside runtime state, then run:
 
 ```text
-workflow-state.py validate-handoff --state <state> --handoff <candidate> --event <event>
-workflow-state.py transition --state <state> --event <event> --handoff <candidate>
+python3 "$TEAM_ROOT/scripts/workflow-state.py" validate-handoff --state <state> --handoff <candidate> --event <event>
+python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --event <event> --handoff <candidate>
 ```
 
 The second command revalidates, persists the accepted handoff, and updates
@@ -112,7 +114,7 @@ Continue the serial loop until a Human Gate, terminal state, `BLOCKED`, or
 evidence proving the blocker removed:
 
 ```text
-workflow-state.py transition --state <state> --event RESOLVED --evidence <file>
+python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --event RESOLVED --evidence <file>
 ```
 
 Use `RESOLVE_BLOCKER` from `NEEDS_HUMAN`; both restore only validated
@@ -124,9 +126,9 @@ Always pause at `AWAITING_EXPLORE_APPROVAL` and present the saved Explore Result
 at the Human Gate. Record the decision before routing:
 
 ```text
-workflow-state.py approve --state <state> --explore-result <file> --decision APPROVE [--publish-authorized]
-workflow-state.py approve --state <state> --explore-result <file> --decision REVISE
-workflow-state.py approve --state <state> --explore-result <file> --decision REJECT
+python3 "$TEAM_ROOT/scripts/workflow-state.py" approve --state <state> --explore-result <file> --decision APPROVE [--publish-authorized]
+python3 "$TEAM_ROOT/scripts/workflow-state.py" approve --state <state> --explore-result <file> --decision REVISE
+python3 "$TEAM_ROOT/scripts/workflow-state.py" approve --state <state> --explore-result <file> --decision REJECT
 ```
 
 Then apply the matching `APPROVE`, `REVISE`, or `REJECT` transition. The
@@ -144,7 +146,7 @@ COMPLETE`; never repeat a proven external effect.
 
 Only `openspec-archivist-publisher` performs a step. The Orchestrator validates
 its current-attempt handoff and records each verified result with
-`workflow-state.py publish-receipt --state <state> --step <step>
+`python3 "$TEAM_ROOT/scripts/workflow-state.py" publish-receipt --state <state> --step <step>
 --result-file <file>` plus `--archive-digest ARCHIVE_DIGEST` or
 `--final-sha FINAL_SHA` when applicable, then routes `STEP_PASS`. Invalid
 authorization or bindings are `BLOCKED`. Archive output containing business
