@@ -38,7 +38,7 @@ OWNER_BY_STATE = {
 }
 
 REQUIRED_BY_STATE = {
-    "EXPLORING": ("PRE_CHANGE", "EXPLORE_BINDING"),
+    "EXPLORING": ("PRE_CHANGE",),
     "PROPOSING": ("POST_CHANGE", "HUMAN_GATE"),
     "REVIEWING_PROPOSAL": ("POST_CHANGE", "HUMAN_GATE"),
     "REVISING_PROPOSAL": ("POST_CHANGE", "HUMAN_GATE"),
@@ -52,7 +52,7 @@ HANDOFF_FIELDS = (
     "RUN_ID", "ATTEMPT_ID", "STATUS", "CHANGE", "REQUEST_ARTIFACT",
     "APPROVAL_ARTIFACT", "SUMMARY", "EVIDENCE", "BLOCKERS", "ARTIFACTS",
     "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
-    "PUBLISH_STEP_RECEIPTS", "NEXT_STATE", "EXPLORE_ARTIFACT", "EXPLORE_DIGEST",
+    "PUBLISH_STEP_RECEIPTS", "NEXT_STATE",
 )
 
 VALID_STATUSES = {"PASS", "FAIL", "BLOCKED", "NEEDS_HUMAN"}
@@ -218,11 +218,6 @@ def validate_handoff(state, payload, event):
             for field in ("CHANGE", "PROPOSAL_DIGEST", "PROGRESS_DIGEST"):
                 if payload.get(field) is not None:
                     raise ValueError("%s must be null before Change creation" % field)
-        elif requirement == "EXPLORE_BINDING":
-            artifact = payload.get("EXPLORE_ARTIFACT")
-            digest = payload.get("EXPLORE_DIGEST")
-            if not artifact or not digest or not Path(artifact).is_file() or sha256_file(artifact) != digest:
-                raise ValueError("missing or invalid Explore binding")
         elif requirement == "POST_CHANGE":
             for field in ("CHANGE", "PROPOSAL_DIGEST"):
                 if not payload.get(field):
@@ -245,6 +240,11 @@ def validate_handoff(state, payload, event):
             validate_receipt_progression(
                 state.get("PUBLISH_STEP_RECEIPTS", []), payload["PUBLISH_STEP_RECEIPTS"], payload["PUBLISH_STEP"],
             )
+    if current == "EXPLORING" and event == "PASS":
+        artifact = payload.get("EXPLORE_ARTIFACT")
+        digest = payload.get("EXPLORE_DIGEST")
+        if not artifact or not digest or not Path(artifact).is_file() or sha256_file(artifact) != digest:
+            raise ValueError("missing or invalid Explore binding")
     for field in BINDING_FIELDS:
         if state.get(field) is not None and payload.get(field) is not None and payload.get(field) != state[field]:
             raise ValueError("mismatched %s" % field)
@@ -449,12 +449,27 @@ def validate_recovery(state, event, evidence_path):
     return {"PATH": str(evidence_path), "DIGEST": sha256_file(evidence_path)}
 
 
+def is_exact_step_pass_replay(state, handoff, event):
+    if event != "STEP_PASS" or not isinstance(handoff, dict):
+        return False
+    if state.get("STATE") not in {"PUBLISHING", "DONE"}:
+        return False
+    if handoff.get("NEXT_STATE") != state.get("STATE"):
+        return False
+    if handoff.get("PUBLISH_STEP_RECEIPTS") != state.get("PUBLISH_STEP_RECEIPTS"):
+        return False
+    return handoff in state.get("HANDOFFS", [])
+
+
 def transition(args):
     path = Path(args.state)
     state = read_json(path)
     current = state.get("STATE")
     event = args.event
     handoff = read_json(args.handoff) if args.handoff is not None else None
+    if args.handoff is not None and is_exact_step_pass_replay(state, handoff, event):
+        print(json.dumps(state, sort_keys=True))
+        return
     if args.handoff is not None:
         validate_handoff(state, handoff, event)
     recovery = validate_recovery(state, event, args.evidence)

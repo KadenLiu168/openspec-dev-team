@@ -118,6 +118,19 @@ class WorkflowStateHandoffTests(unittest.TestCase):
         result = self.run_command("validate-handoff")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_accepts_post_apply_exact_contract_without_explore_fields(self):
+        self.write_state("APPLYING")
+        payload = {
+            "RUN_ID": "run-1", "ATTEMPT_ID": "attempt-current", "STATUS": "PASS",
+            "CHANGE": "sample-change", "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": "approval.json",
+            "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
+            "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress", "BASE_SHA": "base",
+            "HEAD_SHA": "head", "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AUDITING", "OWNER": "Apply Executor",
+        }
+        self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+        result = self.run_command("validate-handoff")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejected_handoffs_leave_state_unchanged(self):
         cases = [
             {"RUN_ID": "other"},
@@ -194,6 +207,10 @@ class WorkflowStateDigestTests(unittest.TestCase):
         self.tasks.write_bytes(b"- [ ] caf\xc3\xa9")
         raw = self.digest()
         self.assertEqual(raw["PROGRESS_DIGEST"], hashlib.sha256(b"- [ ] caf\xc3\xa9").hexdigest())
+        crlf_bytes = b"- [ ] task\r\nsecond line\r\n"
+        self.tasks.write_bytes(crlf_bytes)
+        crlf = self.digest()
+        self.assertEqual(crlf["PROGRESS_DIGEST"], hashlib.sha256(crlf_bytes).hexdigest())
 
     def test_task_text_and_design_change_proposal_digest(self):
         before = self.digest()
@@ -370,6 +387,13 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         self.assert_json_error_and_unchanged(approval, before)
         self.assertFalse((self.root / "approval.json").exists())
 
+    def test_explore_blocked_handoff_does_not_require_result_binding(self):
+        self.write_state()
+        self.handoff(STATUS="BLOCKED", NEXT_STATE="BLOCKED", EXPLORE_ARTIFACT=None, EXPLORE_DIGEST=None)
+        result = self.transition("BLOCKED")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "BLOCKED")
+
     def test_audit_fail_handoff_uses_audit_counter_not_proposal_counter(self):
         self.write_state(STATE="AUDITING", ATTEMPT_COUNT=2, PROPOSAL_FAILURE_COUNT=2, AUDIT_FAILURE_COUNT=0,
                          CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
@@ -472,6 +496,41 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         result = self.transition("STEP_PASS")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["PUBLISH_STEP_RECEIPTS"], receipts)
+
+    def test_step_pass_replays_same_handoff_before_and_after_complete(self):
+        preflight = [{"STEP": "PREFLIGHT"}]
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=[])
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="PREFLIGHT", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=preflight,
+                     NEXT_STATE="PUBLISHING")
+        self.assertEqual(self.transition("STEP_PASS").returncode, 0)
+        accepted = json.loads(self.state_path.read_text(encoding="utf-8"))["HANDOFFS"][0]
+        altered = dict(accepted)
+        altered["SUMMARY"] = "altered"
+        self.handoff_path.write_text(json.dumps(altered), encoding="utf-8")
+        before_rejection = self.state_path.read_bytes()
+        self.assert_json_error_and_unchanged(self.transition("STEP_PASS"), before_rejection)
+        self.handoff_path.write_text(json.dumps(accepted), encoding="utf-8")
+        before_replay = self.state_path.read_bytes()
+        replay = self.transition("STEP_PASS")
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before_replay)
+
+        prefix = [{"STEP": step} for step in ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LINEAR_SYNC")]
+        self.write_state(STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress",
+                         BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=prefix)
+        complete = prefix + [{"STEP": "COMPLETE"}]
+        self.handoff(OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                     PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json",
+                     PUBLISH_STEP="COMPLETE", ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=complete,
+                     NEXT_STATE="DONE")
+        self.assertEqual(self.transition("STEP_PASS").returncode, 0)
+        before_done_replay = self.state_path.read_bytes()
+        replay = self.transition("STEP_PASS")
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before_done_replay)
 
     def test_digest_normalizes_only_genuine_markers_and_input_order(self):
         proposal, design, tasks = self.root / "proposal.md", self.root / "design.md", self.root / "tasks.md"
