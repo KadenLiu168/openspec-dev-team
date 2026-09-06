@@ -142,6 +142,7 @@ else:
             if any(marker in name for marker in ("TOKEN", "KEY", "SECRET")):
                 self.assertNotIn(name, output)
                 self.assertNotIn(value, output)
+                self.assertNotIn(json.dumps(value)[1:-1], output)
         self.assertNotEqual(output, "")
         for line in output.splitlines():
             self.assertRegex(line, r"^(PASS|WARN|FAIL) ")
@@ -338,6 +339,39 @@ else:
         for marker in ("TOKEN", "KEY", "SECRET"):
             (self.project / (self.env["DOCTOR_TEST_" + marker] + ".txt")).write_text("private\n")
         self.assertIn("[redacted]", self.run_doctor("--project", self.project))
+
+    def test_escaped_sensitive_untracked_paths_are_redacted_before_json_encoding(self):
+        for index, value in enumerate(('credential"quote', "credential\\backslash",
+                                       "credential\nnewline", "credential-敏感")):
+            self.env["DOCTOR_TEST_SECRET_CASE_" + str(index)] = value
+            (self.project / (value + '-"public\\suffix\n终".txt')).write_text("private\n")
+        for prefix in ("PASS untracked baseline ", "WARN untracked new "):
+            with self.subTest(diagnostic=prefix):
+                output = self.run_doctor("--project", self.project)
+                labels = [json.loads(line[len(prefix):]) for line in output.splitlines()
+                          if line.startswith(prefix)]
+                self.assertEqual(labels, ['[redacted]-"public\\suffix\n终".txt'] * 4)
+            (self.agents / "state/run.json").write_text(json.dumps({
+                "RUN_ID": "run", "STATE": "APPLYING", "UNTRACKED_BASELINE": [],
+            }))
+
+    def test_escaped_sensitive_lock_names_are_redacted_before_json_encoding(self):
+        identities = (
+            ("stale", {"PID": 2147483647}, "WARN stale lock "),
+            ("live", {"PID": os.getpid()}, "PASS lock owner present "),
+            ("unknown", {}, "WARN lock identity could not be verified "),
+        )
+        for index, value in enumerate(('credential"quote', "credential\\backslash",
+                                       "credential\nnewline", "credential-敏感")):
+            self.env["DOCTOR_TEST_SECRET_CASE_" + str(index)] = value
+            for kind, identity, prefix in identities:
+                (self.agents / (kind + "-" + value + ".lock")).write_text(json.dumps(identity))
+        output = self.run_doctor("--project", self.project)
+        for kind, identity, prefix in identities:
+            with self.subTest(diagnostic=prefix):
+                labels = [json.loads(line[len(prefix):]) for line in output.splitlines()
+                          if line.startswith(prefix)]
+                self.assertEqual(labels, [kind + "-[redacted].lock"] * 4)
 
     def test_project_tracked_dirty_or_staged_files_need_human(self):
         (self.project / "tracked.txt").write_text("modified\n")

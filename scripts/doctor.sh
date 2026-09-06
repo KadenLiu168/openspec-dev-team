@@ -33,12 +33,20 @@ SENSITIVE_VALUES = sorted({
 }, key=len, reverse=True)
 
 
+def redact(message):
+    for value in SENSITIVE_VALUES:
+        message = message.replace(value, "[redacted]")
+    return message
+
+
+def display_path(path):
+    return json.dumps(redact(str(path)))
+
+
 def report(status, message):
     global FAILED
     FAILED = FAILED or status == "FAIL"
-    for value in SENSITIVE_VALUES:
-        message = message.replace(value, "[redacted]")
-    print(status + " " + message)
+    print(status + " " + redact(message))
 
 
 def check(valid, message):
@@ -161,14 +169,14 @@ def untracked_paths(git_root):
     baseline = set.intersection(*baselines) if baselines else paths
     for path in sorted(paths):
         if path in baseline:
-            report("PASS", "untracked baseline " + json.dumps(path))
+            report("PASS", "untracked baseline " + display_path(path))
         else:
-            report("WARN", "untracked new " + json.dumps(path))
+            report("WARN", "untracked new " + display_path(path))
 
 
 def lock_checks(agents):
     for path in sorted(agents.glob("*.lock")):
-        label = json.dumps(path.name)
+        label = display_path(path.name)
         try:
             lock = json.loads(path.read_text())
             pid = lock.get("PID", lock.get("pid"))
