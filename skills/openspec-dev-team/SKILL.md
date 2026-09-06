@@ -13,14 +13,18 @@ Gate, validated handoffs, and recovery, not a parallel lifecycle.
 The Orchestrator must not implement, review, or publish. It never receives the
 full conversation and never substitutes itself for a specialist.
 
-Resolve `TEAM_ROOT` to the repository two directories above this `SKILL.md`'s
-concrete target. Read these canonical contracts there before routing:
+Resolve three roots before routing. `SKILL_DIR` is the concrete directory that
+contains this `SKILL.md` after resolving an installed symlink. `TEAM_ROOT` is
+two directories above `SKILL_DIR`. `PROJECT_ROOT` is the target project's Git
+root. The `python3` resolved from `PATH` must be Python 3.11+ with `tomllib`.
 
-- `references/state-machine.md`
-- `agents/shared/workflow-policy.md`
-- `agents/shared/handoff-contract.md`
-- `agents/team/orchestrator.md`
-- `.agents/project.md`
+Read each canonical contract from its owning root:
+
+- `$SKILL_DIR/references/state-machine.md`
+- `$TEAM_ROOT/agents/shared/workflow-policy.md`
+- `$TEAM_ROOT/agents/shared/handoff-contract.md`
+- `$TEAM_ROOT/agents/team/orchestrator.md`
+- `$PROJECT_ROOT/.agents/project.md`
 
 Work serially on `main`. Never create a branch or worktree, and never hard-code
 an OpenSpec Change directory.
@@ -40,7 +44,7 @@ fresh context containing only contract fields and bounded artifact paths.
 
 ## Start or resume
 
-1. Discover the Git root and read `.agents/project.md`. Require its
+1. Discover `PROJECT_ROOT` and read `$PROJECT_ROOT/.agents/project.md`. Require its
    `PROJECT_REALPATH`, `main` branch, and remote bindings to match reality.
 2. Run `"$TEAM_ROOT/scripts/doctor.sh" --global` and
    `"$TEAM_ROOT/scripts/doctor.sh" --project "$PROJECT_REALPATH"`. Stop on
@@ -48,7 +52,7 @@ fresh context containing only contract fields and bounded artifact paths.
 3. For a new request, run:
 
    ```text
-   python3 "$TEAM_ROOT/scripts/workflow-state.py" init --project "$PROJECT_REALPATH" --request "$REQUEST" [--publish]
+   python3 "$TEAM_ROOT/scripts/workflow-state.py" init --project "$PROJECT_ROOT" --request "$REQUEST" [--publish]
    ```
 
    This creates `REQUEST_ARTIFACT`, `.agents/state/<RUN_ID>.json`, and
@@ -107,7 +111,8 @@ python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --even
 The second command revalidates, persists the accepted handoff, and updates
 state atomically. A rejected handoff is not persisted and leaves state
 unchanged; report `BLOCKED` with validation evidence instead of guessing or
-dispatching another owner. Never accept a stale attempt.
+dispatching another owner. Never accept a stale attempt. For `STEP_PASS`, use
+the three-command Publishing sequence below instead.
 
 Continue the serial loop until a Human Gate, terminal state, `BLOCKED`, or
 `NEEDS_HUMAN`. `BLOCKED` never retries automatically. Resume only with new
@@ -144,13 +149,27 @@ using the Audit binding and `PUBLISH_STEP_RECEIPTS`. Continue only the first inc
 in `PREFLIGHT -> ARCHIVE -> VALIDATE -> FINAL_COMMIT -> PUSH -> LINEAR_SYNC ->
 COMPLETE`; never repeat a proven external effect.
 
-Only `openspec-archivist-publisher` performs a step. The Orchestrator validates
-its current-attempt handoff and records each verified result with
-`python3 "$TEAM_ROOT/scripts/workflow-state.py" publish-receipt --state <state> --step <step>
---result-file <file>` plus `--archive-digest ARCHIVE_DIGEST` or
-`--final-sha FINAL_SHA` when applicable, then routes `STEP_PASS`. Invalid
-authorization or bindings are `BLOCKED`. Archive output containing business
-code invalidates the Audit PASS and requires `AUDITING` again.
+Only `openspec-archivist-publisher` performs a step. It returns a current-attempt
+handoff whose final receipt is the authoritative receipt payload: step, result
+path and digest, time, input digests, and applicable `ARCHIVE_DIGEST` or
+`FINAL_SHA`. The Orchestrator uses that same candidate in this exact order:
+
+```text
+python3 "$TEAM_ROOT/scripts/workflow-state.py" validate-handoff --state <state> --handoff <candidate> --event STEP_PASS
+python3 "$TEAM_ROOT/scripts/workflow-state.py" publish-receipt --state <state> --handoff <candidate> --step <step> --result-file <file> [--archive-digest <digest>] [--final-sha <sha>]
+python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --handoff <candidate> --event STEP_PASS
+```
+
+`publish-receipt` verifies and persists the candidate's exact final receipt but
+never changes lifecycle state. Only `transition` advances the event;
+`COMPLETE` becomes `DONE` there. Exact replays are idempotent, while a skipped
+or altered receipt is rejected without mutation.
+
+For unauthorized preflight, accept only a `BLOCKED` handoff at `PREFLIGHT` with
+the unchanged receipt list; no `ARCHIVE_DIGEST` exists yet. Do not record a
+receipt or send `STEP_PASS`. Other invalid authorization or bindings are also
+`BLOCKED`. Archive output containing business code invalidates the Audit PASS
+and requires `AUDITING` again.
 
 ## Smoke
 

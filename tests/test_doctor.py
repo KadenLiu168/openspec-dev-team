@@ -161,6 +161,21 @@ else:
         self.assertIn("PASS skill", output)
         self.assertIn("PASS python3", output)
 
+    def test_global_accepts_actual_repository_source_modes(self):
+        skill_link = self.home / ".codex/skills/openspec-dev-team"
+        skill_link.unlink()
+        skill_link.symlink_to(REPOSITORY / "skills/openspec-dev-team")
+        for name in AGENTS:
+            link = self.home / ".codex/agents" / (name + ".toml")
+            link.unlink()
+            link.symlink_to(REPOSITORY / "profiles/codex/agents" / (name + ".toml"))
+        result = subprocess.run(
+            ["/bin/bash", str(SCRIPT), "--global"], cwd=self.root, env=self.env,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS executable scripts/workflow-state.py", result.stdout)
+
     def test_global_missing_skill_link(self):
         (self.home / ".codex/skills/openspec-dev-team").unlink()
         self.assertIn("FAIL skill", self.run_doctor("--global", success=False))

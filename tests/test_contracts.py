@@ -179,6 +179,21 @@ class OrchestrationDocumentationTests(unittest.TestCase):
                 self.assertIn(required, content)
         self.assertNotIn("openspec/changes/", content)
 
+    def test_skill_resolves_each_interface_from_its_canonical_root(self):
+        content = self.read_document(SKILL)
+        for required in (
+            "SKILL_DIR", "TEAM_ROOT", "PROJECT_ROOT",
+            "$SKILL_DIR/references/state-machine.md",
+            "$TEAM_ROOT/agents/shared/workflow-policy.md",
+            "$TEAM_ROOT/agents/shared/handoff-contract.md",
+            "$TEAM_ROOT/agents/team/orchestrator.md",
+            "$PROJECT_ROOT/.agents/project.md",
+            "$TEAM_ROOT/scripts/doctor.sh",
+            "$TEAM_ROOT/scripts/workflow-state.py",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, content)
+
     def test_skill_initializes_or_resumes_project_bound_request_provenance(self):
         content = self.read_document(SKILL)
         for required in (
@@ -265,6 +280,29 @@ class OrchestrationDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
+        self.assertIn("`python3` resolved from `PATH` must be Python 3.11+", content)
+
+    def test_readme_installation_preflights_every_link_target(self):
+        content = self.read_document(README)
+        installation = content.split("## Installation", 1)[1].split("## Project bootstrap", 1)[0]
+        for required in (
+            "install_link", '[ -e "$link" ] || [ -L "$link" ]',
+            'ln -s -- "$source" "$link"', "return 1", ".codex/skills/openspec-dev-team",
+            "openspec-explore-proposal.toml", "openspec-proposal-reviewer.toml",
+            "openspec-apply-executor.toml", "openspec-pre-archive-auditor.toml",
+            "openspec-archivist-publisher.toml",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, installation)
+        first_install = installation.index('install_link "$repository/skills/openspec-dev-team"')
+        preflight = installation[:first_install]
+        for destination in (
+            ".codex/skills/openspec-dev-team", "openspec-explore-proposal.toml",
+            "openspec-proposal-reviewer.toml", "openspec-apply-executor.toml",
+            "openspec-pre-archive-auditor.toml", "openspec-archivist-publisher.toml",
+        ):
+            with self.subTest(preflight_destination=destination):
+                self.assertIn(destination, preflight)
 
     def test_readme_documents_bootstrap_use_human_gate_and_diagnostics(self):
         content = self.read_document(README)

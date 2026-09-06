@@ -285,30 +285,104 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
 
     def test_publish_receipts_are_ordered_replayable_and_finish_at_complete(self):
         state_path = self.project / "state.json"
-        state_path.write_text(json.dumps({"RUN_ID": "run-1", "STATE": "PUBLISHING"}), encoding="utf-8")
-        first = self.project / "preflight.json"
-        first.write_text("preflight", encoding="utf-8")
-        skipped = self.invoke("publish-receipt", "--state", str(state_path), "--step", "ARCHIVE",
-                              "--result-file", str(first))
+        handoff_path = self.project / "handoff.json"
+        state = {
+            "RUN_ID": "run-1", "STATE": "PUBLISHING", "ATTEMPT_ID": "attempt-1",
+            "CHANGE": "change", "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress",
+            "BASE_SHA": "base", "HEAD_SHA": "head", "APPROVAL_ARTIFACT": "approval.json",
+            "REMOTE_URL": "https://example.test/repo.git", "PUBLISH_STEP_RECEIPTS": [],
+        }
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        first = self.project / "archive.json"
+        first.write_text("ARCHIVE", encoding="utf-8")
+        skipped_receipt = {
+            "STEP": "ARCHIVE", "RESULT_FILE": str(first.resolve()),
+            "RESULT_DIGEST": hashlib.sha256(first.read_bytes()).hexdigest(),
+            "RECORDED_AT": "2026-09-06T00:00:00+00:00",
+            "INPUT_DIGESTS": {"PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress"},
+            "ARCHIVE_DIGEST": "archive",
+        }
+        skipped_handoff = {
+            "RUN_ID": "run-1", "ATTEMPT_ID": "attempt-1", "STATUS": "PASS", "CHANGE": "change",
+            "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": "approval.json",
+            "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
+            "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress", "BASE_SHA": "base",
+            "HEAD_SHA": "head", "PUBLISH_STEP_RECEIPTS": [skipped_receipt],
+            "NEXT_STATE": "PUBLISHING", "OWNER": "Archivist / Publisher",
+            "PUBLISH_STEP": "ARCHIVE", "ARCHIVE_DIGEST": "archive",
+        }
+        handoff_path.write_text(json.dumps(skipped_handoff), encoding="utf-8")
+        before_skip = state_path.read_bytes()
+        skipped = self.invoke(
+            "publish-receipt", "--state", str(state_path), "--handoff", str(handoff_path),
+            "--step", "ARCHIVE", "--result-file", str(first), "--archive-digest", "archive",
+        )
         self.assertNotEqual(skipped.returncode, 0)
-        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["STATE"], "PUBLISHING")
+        self.assertEqual(state_path.read_bytes(), before_skip)
 
         steps = ["PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LINEAR_SYNC", "COMPLETE"]
-        for step in steps:
+        receipts = []
+        for index, step in enumerate(steps):
             result_file = self.project / (step.lower() + ".json")
             result_file.write_text(step, encoding="utf-8")
-            result = self.invoke("publish-receipt", "--state", str(state_path), "--step", step,
-                                 "--result-file", str(result_file))
-            self.assertEqual(result.returncode, 0, result.stderr)
             saved = json.loads(state_path.read_text(encoding="utf-8"))
-            expected = "DONE" if step == "COMPLETE" else "PUBLISHING"
-            self.assertEqual(saved["STATE"], expected)
+            receipt = {
+                "STEP": step, "RESULT_FILE": str(result_file.resolve()),
+                "RESULT_DIGEST": hashlib.sha256(result_file.read_bytes()).hexdigest(),
+                "RECORDED_AT": "2026-09-06T00:00:%02d+00:00" % index,
+                "INPUT_DIGESTS": {"PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress"},
+            }
+            archive_digest = "archive" if index >= 1 else None
+            final_sha = "final" if index >= 3 else None
+            if archive_digest:
+                receipt["ARCHIVE_DIGEST"] = archive_digest
+            if final_sha:
+                receipt["FINAL_SHA"] = final_sha
+            handoff = {
+                "RUN_ID": "run-1", "ATTEMPT_ID": saved["ATTEMPT_ID"], "STATUS": "PASS",
+                "CHANGE": "change", "REQUEST_ARTIFACT": "request.md",
+                "APPROVAL_ARTIFACT": "approval.json", "SUMMARY": "summary", "EVIDENCE": [],
+                "BLOCKERS": [], "ARTIFACTS": [], "PROPOSAL_DIGEST": "proposal",
+                "PROGRESS_DIGEST": "progress", "BASE_SHA": "base", "HEAD_SHA": "head",
+                "PUBLISH_STEP_RECEIPTS": receipts + [receipt],
+                "NEXT_STATE": "DONE" if step == "COMPLETE" else "PUBLISHING",
+                "OWNER": "Archivist / Publisher", "PUBLISH_STEP": step,
+                "ARCHIVE_DIGEST": archive_digest,
+            }
+            handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+            validation = self.invoke(
+                "validate-handoff", "--state", str(state_path), "--handoff", str(handoff_path),
+                "--event", "STEP_PASS",
+            )
+            self.assertEqual(validation.returncode, 0, validation.stderr)
+            arguments = [
+                "publish-receipt", "--state", str(state_path), "--handoff", str(handoff_path),
+                "--step", step, "--result-file", str(result_file),
+            ]
+            if archive_digest:
+                arguments.extend(["--archive-digest", archive_digest])
+            if final_sha:
+                arguments.extend(["--final-sha", final_sha])
+            result = self.invoke(*arguments)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(recorded["STATE"], "PUBLISHING")
+            self.assertEqual(recorded["PUBLISH_STEP_RECEIPTS"], receipts + [receipt])
+            before_replay = state_path.read_bytes()
+            replay = self.invoke(*arguments)
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual(state_path.read_bytes(), before_replay)
+            transition = self.invoke(
+                "transition", "--state", str(state_path), "--handoff", str(handoff_path),
+                "--event", "STEP_PASS",
+            )
+            self.assertEqual(transition.returncode, 0, transition.stderr)
+            receipts.append(receipt)
 
-        complete_file = self.project / "complete.json"
-        replay = self.invoke("publish-receipt", "--state", str(state_path), "--step", "COMPLETE",
-                             "--result-file", str(complete_file))
-        self.assertEqual(replay.returncode, 0, replay.stderr)
-        self.assertEqual(len(json.loads(state_path.read_text(encoding="utf-8"))["PUBLISH_STEP_RECEIPTS"]), 7)
+        finished = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(finished["STATE"], "DONE")
+        self.assertEqual(finished["PUBLISH_STEP_RECEIPTS"], receipts)
 
 class WorkflowStateFixRegressionTests(unittest.TestCase):
     def setUp(self):
@@ -393,6 +467,58 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         result = self.transition("BLOCKED")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["STATE"], "BLOCKED")
+
+    def test_publishing_unauthorized_preflight_blocked_needs_no_archive_receipt(self):
+        self.write_state(
+            STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal",
+            PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+            APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=[],
+        )
+        self.handoff(
+            OWNER="Archivist / Publisher", STATUS="BLOCKED", CHANGE="change",
+            PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress", BASE_SHA="base",
+            HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP="PREFLIGHT",
+            ARCHIVE_DIGEST=None, PUBLISH_STEP_RECEIPTS=[], NEXT_STATE="BLOCKED",
+            BLOCKERS=["publish authorization missing"],
+        )
+        result = self.transition("BLOCKED")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["STATE"], "BLOCKED")
+        self.assertEqual(saved["RESUME_STATE"], "PUBLISHING")
+        self.assertEqual(saved["PUBLISH_STEP_RECEIPTS"], [])
+
+    def test_publishing_success_still_rejects_missing_stage_requirements(self):
+        base = {
+            "STATE": "PUBLISHING", "CHANGE": "change", "PROPOSAL_DIGEST": "proposal",
+            "PROGRESS_DIGEST": "progress", "BASE_SHA": "base", "HEAD_SHA": "head",
+            "APPROVAL_ARTIFACT": "approval.json", "PUBLISH_STEP_RECEIPTS": [],
+        }
+        archive_prefix = [{"STEP": "PREFLIGHT"}]
+        self.write_state(**base)
+        self.handoff(
+            OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+            PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+            APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP="PREFLIGHT",
+            ARCHIVE_DIGEST=None, PUBLISH_STEP_RECEIPTS=[], NEXT_STATE="PUBLISHING",
+        )
+        before = self.state_path.read_bytes()
+        result = self.transition("STEP_PASS")
+        self.assert_json_error_and_unchanged(result, before)
+        self.assertIn("missing PUBLISH_STEP_RECEIPTS", json.loads(result.stderr)["error"])
+
+        self.write_state(**{**base, "PUBLISH_STEP_RECEIPTS": archive_prefix})
+        self.handoff(
+            OWNER="Archivist / Publisher", CHANGE="change", PROPOSAL_DIGEST="proposal",
+            PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+            APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP="ARCHIVE",
+            ARCHIVE_DIGEST=None, PUBLISH_STEP_RECEIPTS=archive_prefix + [{"STEP": "ARCHIVE"}],
+            NEXT_STATE="PUBLISHING",
+        )
+        before = self.state_path.read_bytes()
+        result = self.transition("STEP_PASS")
+        self.assert_json_error_and_unchanged(result, before)
+        self.assertIn("missing ARCHIVE_DIGEST", json.loads(result.stderr)["error"])
 
     def test_audit_fail_handoff_uses_audit_counter_not_proposal_counter(self):
         self.write_state(STATE="AUDITING", ATTEMPT_COUNT=2, PROPOSAL_FAILURE_COUNT=2, AUDIT_FAILURE_COUNT=0,
@@ -571,9 +697,13 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         receipt.write_text("preflight", encoding="utf-8")
         state["STATE"] = "PUBLISHING"
         state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        handoff_path = self.root / "no-origin-handoff.json"
+        handoff_path.write_text("{}", encoding="utf-8")
         before = state_path.read_bytes()
-        result = self.invoke("publish-receipt", "--state", str(state_path), "--step", "PREFLIGHT",
-                             "--result-file", str(receipt))
+        result = self.invoke(
+            "publish-receipt", "--state", str(state_path), "--handoff", str(handoff_path),
+            "--step", "PREFLIGHT", "--result-file", str(receipt),
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(state_path.read_bytes(), before)
 
@@ -607,13 +737,19 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         uuid.UUID(json.loads(self.state_path.read_text(encoding="utf-8"))["ATTEMPT_ID"])
         result_file = self.root / "result.json"
         result_file.write_text("same", encoding="utf-8")
-        self.write_state(STATE="PUBLISHING", PUBLISH_STEP_RECEIPTS=[{
+        existing = {
             "STEP": "PREFLIGHT", "RESULT_FILE": str(result_file.resolve()),
             "RESULT_DIGEST": hashlib.sha256(result_file.read_bytes()).hexdigest(),
-        }])
+        }
+        self.write_state(STATE="PUBLISHING", PUBLISH_STEP_RECEIPTS=[existing])
+        self.handoff_path.write_text(json.dumps({
+            "PUBLISH_STEP_RECEIPTS": [{**existing, "ARCHIVE_DIGEST": "different"}],
+        }), encoding="utf-8")
         before = self.state_path.read_bytes()
-        result = self.invoke("publish-receipt", "--state", str(self.state_path), "--step", "PREFLIGHT",
-                             "--result-file", str(result_file), "--archive-digest", "different")
+        result = self.invoke(
+            "publish-receipt", "--state", str(self.state_path), "--handoff", str(self.handoff_path),
+            "--step", "PREFLIGHT", "--result-file", str(result_file), "--archive-digest", "different",
+        )
         self.assert_json_error_and_unchanged(result, before)
 
 

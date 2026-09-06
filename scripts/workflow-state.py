@@ -230,16 +230,18 @@ def validate_handoff(state, payload, event):
                 if not payload.get(field):
                     raise ValueError("missing %s" % field)
         elif requirement == "PUBLISHING":
-            for field in ("PUBLISH_STEP", "ARCHIVE_DIGEST"):
-                if not payload.get(field):
-                    raise ValueError("missing %s" % field)
-            if not payload.get("PUBLISH_STEP_RECEIPTS"):
-                raise ValueError("missing PUBLISH_STEP_RECEIPTS")
-            if payload["PUBLISH_STEP"] not in PUBLISH_STEPS:
+            step = payload.get("PUBLISH_STEP")
+            if step not in PUBLISH_STEPS:
                 raise ValueError("invalid PUBLISH_STEP")
-            validate_receipt_progression(
-                state.get("PUBLISH_STEP_RECEIPTS", []), payload["PUBLISH_STEP_RECEIPTS"], payload["PUBLISH_STEP"],
-            )
+            receipts = payload.get("PUBLISH_STEP_RECEIPTS")
+            if event == "STEP_PASS":
+                if not receipts:
+                    raise ValueError("missing PUBLISH_STEP_RECEIPTS")
+                validate_receipt_progression(state.get("PUBLISH_STEP_RECEIPTS", []), receipts, step)
+                if PUBLISH_STEPS.index(step) >= PUBLISH_STEPS.index("ARCHIVE") and not payload.get("ARCHIVE_DIGEST"):
+                    raise ValueError("missing ARCHIVE_DIGEST")
+            elif receipts != state.get("PUBLISH_STEP_RECEIPTS", []):
+                raise ValueError("mismatched PUBLISH_STEP_RECEIPTS")
     if current == "EXPLORING" and event == "PASS":
         artifact = payload.get("EXPLORE_ARTIFACT")
         digest = payload.get("EXPLORE_DIGEST")
@@ -388,6 +390,12 @@ def publish_receipt_command(args):
     state = read_json(state_path)
     if state.get("REMOTE_URL") == "":
         raise ValueError("publishing requires a configured remote")
+    payload = read_json(args.handoff)
+    proposed = payload.get("PUBLISH_STEP_RECEIPTS") if isinstance(payload, dict) else None
+    validate_receipt_sequence(proposed)
+    if not proposed or proposed[-1].get("STEP") != args.step:
+        raise ValueError("handoff does not contain the current publish receipt")
+    receipt = proposed[-1]
     result_path = Path(args.result_file).resolve()
     if not result_path.is_file():
         raise ValueError("result file does not exist")
@@ -397,37 +405,33 @@ def publish_receipt_command(args):
     step = args.step
     existing = next((item for item in receipts if item["STEP"] == step), None)
     if existing:
-        same = (
-            existing["RESULT_FILE"] == str(result_path)
-            and existing["RESULT_DIGEST"] == result_digest
-            and existing.get("ARCHIVE_DIGEST") == args.archive_digest
-            and existing.get("FINAL_SHA") == args.final_sha
-        )
-        if not same:
+        if receipt != existing:
             raise ValueError("inconsistent duplicate publish receipt")
-        atomic_write(state_path, state)
+        if payload not in state.get("HANDOFFS", []):
+            validate_handoff(state, payload, "STEP_PASS")
+        if (receipt.get("RESULT_FILE") != str(result_path)
+                or receipt.get("RESULT_DIGEST") != result_digest
+                or receipt.get("ARCHIVE_DIGEST") != args.archive_digest
+                or receipt.get("FINAL_SHA") != args.final_sha):
+            raise ValueError("publish receipt does not match result")
         print(json.dumps(state, sort_keys=True))
         return
     if state.get("STATE") != "PUBLISHING":
         raise ValueError("publish receipts require PUBLISHING")
-    receipt = {
-        "STEP": step,
-        "RESULT_FILE": str(result_path),
-        "RESULT_DIGEST": result_digest,
-        "RECORDED_AT": now(),
-        "INPUT_DIGESTS": {
-            "PROPOSAL_DIGEST": state.get("PROPOSAL_DIGEST"),
-            "PROGRESS_DIGEST": state.get("PROGRESS_DIGEST"),
-        },
-    }
-    if args.archive_digest:
-        receipt["ARCHIVE_DIGEST"] = args.archive_digest
-    if args.final_sha:
-        receipt["FINAL_SHA"] = args.final_sha
+    validate_handoff(state, payload, "STEP_PASS")
+    if (receipt.get("RESULT_FILE") != str(result_path)
+            or receipt.get("RESULT_DIGEST") != result_digest
+            or not isinstance(receipt.get("RECORDED_AT"), str)
+            or not receipt["RECORDED_AT"].strip()
+            or receipt.get("INPUT_DIGESTS") != {
+                "PROPOSAL_DIGEST": state.get("PROPOSAL_DIGEST"),
+                "PROGRESS_DIGEST": state.get("PROGRESS_DIGEST"),
+            }
+            or receipt.get("ARCHIVE_DIGEST") != args.archive_digest
+            or receipt.get("FINAL_SHA") != args.final_sha):
+        raise ValueError("publish receipt does not match result or state")
     validate_receipt_progression(receipts, receipts + [receipt], step)
     receipts.append(receipt)
-    if step == "COMPLETE":
-        state["STATE"] = "DONE"
     atomic_write(state_path, state)
     print(json.dumps(state, sort_keys=True))
 
@@ -541,6 +545,7 @@ def main():
     approval_parser.set_defaults(handler=approve_command)
     receipt_parser = commands.add_parser("publish-receipt")
     receipt_parser.add_argument("--state", required=True)
+    receipt_parser.add_argument("--handoff", required=True)
     receipt_parser.add_argument("--step", required=True)
     receipt_parser.add_argument("--result-file", required=True)
     receipt_parser.add_argument("--archive-digest")

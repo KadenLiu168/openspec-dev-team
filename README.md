@@ -10,26 +10,57 @@ Gate. OpenSpec remains the lifecycle source of truth.
 - Codex with native custom-agent discovery
 - OpenSpec CLI
 - Git, with the target project working directly on `main`
-- Python 3.11+ (`tomllib` is required); repository validation currently uses
-  Python 3.13
+- `python3` resolved from `PATH` must be Python 3.11+ (`tomllib` is required);
+  repository validation currently uses Python 3.13
 
 The `profiles/pi` and `profiles/claude-code` mappings are template-only; this
 installation uses the Codex profiles.
 
 ## Installation
 
-From this repository root, create only absent links (plain `ln -s` refuses to
-replace an existing path):
+From this repository root, preflight every destination before creating any
+link. Both `-e` and `-L` are required because `-e` alone misses a broken
+symlink, while plain `ln -s` can create an unwanted inner link when its target
+is an existing directory or directory symlink.
 
 ```bash
+set -eu
+repository=$(pwd -P)
+
+require_absent() {
+  link=$1
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    printf 'Refusing existing link target: %s\n' "$link" >&2
+    return 1
+  fi
+}
+
+install_link() {
+  source=$1
+  link=$2
+  require_absent "$link"
+  ln -s -- "$source" "$link"
+}
+
+for link in \
+  "$HOME/.codex/skills/openspec-dev-team" \
+  "$HOME/.codex/agents/openspec-explore-proposal.toml" \
+  "$HOME/.codex/agents/openspec-proposal-reviewer.toml" \
+  "$HOME/.codex/agents/openspec-apply-executor.toml" \
+  "$HOME/.codex/agents/openspec-pre-archive-auditor.toml" \
+  "$HOME/.codex/agents/openspec-archivist-publisher.toml"
+do
+  require_absent "$link"
+done
+
 mkdir -p "$HOME/.codex/skills" "$HOME/.codex/agents"
-ln -s "$PWD/skills/openspec-dev-team" "$HOME/.codex/skills/openspec-dev-team"
-ln -s "$PWD/profiles/codex/agents/openspec-explore-proposal.toml" "$HOME/.codex/agents/openspec-explore-proposal.toml"
-ln -s "$PWD/profiles/codex/agents/openspec-proposal-reviewer.toml" "$HOME/.codex/agents/openspec-proposal-reviewer.toml"
-ln -s "$PWD/profiles/codex/agents/openspec-apply-executor.toml" "$HOME/.codex/agents/openspec-apply-executor.toml"
-ln -s "$PWD/profiles/codex/agents/openspec-pre-archive-auditor.toml" "$HOME/.codex/agents/openspec-pre-archive-auditor.toml"
-ln -s "$PWD/profiles/codex/agents/openspec-archivist-publisher.toml" "$HOME/.codex/agents/openspec-archivist-publisher.toml"
-scripts/doctor.sh --global
+install_link "$repository/skills/openspec-dev-team" "$HOME/.codex/skills/openspec-dev-team"
+install_link "$repository/profiles/codex/agents/openspec-explore-proposal.toml" "$HOME/.codex/agents/openspec-explore-proposal.toml"
+install_link "$repository/profiles/codex/agents/openspec-proposal-reviewer.toml" "$HOME/.codex/agents/openspec-proposal-reviewer.toml"
+install_link "$repository/profiles/codex/agents/openspec-apply-executor.toml" "$HOME/.codex/agents/openspec-apply-executor.toml"
+install_link "$repository/profiles/codex/agents/openspec-pre-archive-auditor.toml" "$HOME/.codex/agents/openspec-pre-archive-auditor.toml"
+install_link "$repository/profiles/codex/agents/openspec-archivist-publisher.toml" "$HOME/.codex/agents/openspec-archivist-publisher.toml"
+"$repository/scripts/doctor.sh" --global
 ```
 
 Custom-agent discovery may require a new Codex session after installation.
