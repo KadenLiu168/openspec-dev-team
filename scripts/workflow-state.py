@@ -240,8 +240,21 @@ def validate_handoff(state, payload, event):
                 validate_receipt_progression(state.get("PUBLISH_STEP_RECEIPTS", []), receipts, step)
                 if PUBLISH_STEPS.index(step) >= PUBLISH_STEPS.index("ARCHIVE") and not payload.get("ARCHIVE_DIGEST"):
                     raise ValueError("missing ARCHIVE_DIGEST")
-            elif receipts != state.get("PUBLISH_STEP_RECEIPTS", []):
-                raise ValueError("mismatched PUBLISH_STEP_RECEIPTS")
+            else:
+                persisted_receipts = state.get("PUBLISH_STEP_RECEIPTS", [])
+                if receipts != persisted_receipts:
+                    raise ValueError("mismatched PUBLISH_STEP_RECEIPTS")
+                validate_receipt_sequence(receipts)
+                if len(receipts) >= len(PUBLISH_STEPS) or step != PUBLISH_STEPS[len(receipts)]:
+                    raise ValueError("inconsistent PUBLISH_STEP")
+                archive_index = PUBLISH_STEPS.index("ARCHIVE")
+                if len(receipts) >= archive_index:
+                    archive_digest = payload.get("ARCHIVE_DIGEST")
+                    if not archive_digest:
+                        raise ValueError("missing ARCHIVE_DIGEST")
+                    archived = next((receipt for receipt in receipts if receipt["STEP"] == "ARCHIVE"), None)
+                    if archived is not None and archived.get("ARCHIVE_DIGEST") != archive_digest:
+                        raise ValueError("mismatched ARCHIVE_DIGEST")
     if current == "EXPLORING" and event == "PASS":
         artifact = payload.get("EXPLORE_ARTIFACT")
         digest = payload.get("EXPLORE_DIGEST")

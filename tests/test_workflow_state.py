@@ -488,6 +488,58 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         self.assertEqual(saved["RESUME_STATE"], "PUBLISHING")
         self.assertEqual(saved["PUBLISH_STEP_RECEIPTS"], [])
 
+    def test_publishing_blocked_progress_requires_next_step_and_archive_binding(self):
+        preflight = {"STEP": "PREFLIGHT"}
+        archive = {"STEP": "ARCHIVE", "ARCHIVE_DIGEST": "archive"}
+        cases = (
+            ("archive step missing digest", [preflight], "ARCHIVE", None, "missing ARCHIVE_DIGEST"),
+            ("post-archive missing digest", [preflight, archive], "VALIDATE", None, "missing ARCHIVE_DIGEST"),
+            ("post-archive wrong digest", [preflight, archive], "VALIDATE", "other", "mismatched ARCHIVE_DIGEST"),
+            ("post-archive claims preflight", [preflight, archive], "PREFLIGHT", "archive", "inconsistent PUBLISH_STEP"),
+            ("post-archive claims complete", [preflight, archive], "COMPLETE", "archive", "inconsistent PUBLISH_STEP"),
+        )
+        for label, receipts, step, archive_digest, error in cases:
+            with self.subTest(label=label):
+                self.write_state(
+                    STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal",
+                    PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+                    APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=receipts,
+                )
+                self.handoff(
+                    OWNER="Archivist / Publisher", STATUS="BLOCKED", CHANGE="change",
+                    PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress", BASE_SHA="base",
+                    HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP=step,
+                    ARCHIVE_DIGEST=archive_digest, PUBLISH_STEP_RECEIPTS=receipts,
+                    NEXT_STATE="BLOCKED", BLOCKERS=["blocked"],
+                )
+                before = self.state_path.read_bytes()
+                result = self.transition("BLOCKED")
+                self.assert_json_error_and_unchanged(result, before)
+                self.assertIn(error, json.loads(result.stderr)["error"])
+
+    def test_publishing_blocked_after_archive_accepts_bound_next_step(self):
+        receipts = [
+            {"STEP": "PREFLIGHT"},
+            {"STEP": "ARCHIVE", "ARCHIVE_DIGEST": "archive"},
+        ]
+        self.write_state(
+            STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal",
+            PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+            APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=receipts,
+        )
+        self.handoff(
+            OWNER="Archivist / Publisher", STATUS="BLOCKED", CHANGE="change",
+            PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress", BASE_SHA="base",
+            HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP="VALIDATE",
+            ARCHIVE_DIGEST="archive", PUBLISH_STEP_RECEIPTS=receipts,
+            NEXT_STATE="BLOCKED", BLOCKERS=["validation unavailable"],
+        )
+        result = self.transition("BLOCKED")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["STATE"], "BLOCKED")
+        self.assertEqual(saved["PUBLISH_STEP_RECEIPTS"], receipts)
+
     def test_publishing_success_still_rejects_missing_stage_requirements(self):
         base = {
             "STATE": "PUBLISHING", "CHANGE": "change", "PROPOSAL_DIGEST": "proposal",
