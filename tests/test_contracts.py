@@ -1,6 +1,7 @@
 """Static contract checks for the OpenSpec development team."""
 
 from pathlib import Path
+import tomllib
 import unittest
 
 
@@ -17,6 +18,28 @@ ROLE_FILES = (
 )
 STATE_MACHINE = ROOT / "skills/openspec-dev-team/references/state-machine.md"
 CONTRACT_FILES = (WORKFLOW_POLICY, HANDOFF_CONTRACT, *ROLE_FILES, STATE_MACHINE)
+
+EXPECTED_AGENTS = {
+    "openspec-explore-proposal": ("gpt-5.6-sol", "medium", "workspace-write"),
+    "openspec-proposal-reviewer": ("gpt-5.6-terra", "high", "read-only"),
+    "openspec-apply-executor": ("gpt-5.6-terra", "high", "workspace-write"),
+    "openspec-pre-archive-auditor": ("gpt-5.6-terra", "high", "workspace-write"),
+    "openspec-archivist-publisher": ("gpt-5.6-luna", "medium", "workspace-write"),
+}
+
+AGENT_ROLE_CONTRACTS = {
+    "openspec-explore-proposal": "agents/team/explore-proposal.md",
+    "openspec-proposal-reviewer": "agents/team/proposal-reviewer.md",
+    "openspec-apply-executor": "agents/team/apply-executor.md",
+    "openspec-pre-archive-auditor": "agents/team/pre-archive-auditor.md",
+    "openspec-archivist-publisher": "agents/team/archivist-publisher.md",
+}
+
+CODEX_AGENTS = ROOT / "profiles/codex/agents"
+PLATFORM_MAPPING_FILES = (
+    ROOT / "profiles/pi/README.md",
+    ROOT / "profiles/claude-code/README.md",
+)
 
 REQUIRED_HANDOFF_FIELDS = {
     "RUN_ID", "ATTEMPT_ID", "STATUS", "CHANGE",
@@ -89,6 +112,34 @@ class ContractTests(unittest.TestCase):
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, content)
+
+    def test_codex_agent_profiles_match_required_runtime_contracts(self):
+        for name, expected in EXPECTED_AGENTS.items():
+            with self.subTest(agent=name):
+                profile_path = CODEX_AGENTS / f"{name}.toml"
+                with profile_path.open("rb") as profile_file:
+                    profile = tomllib.load(profile_file)
+
+                self.assertEqual(name, profile["name"])
+                self.assertTrue(profile["description"])
+                instructions = profile["developer_instructions"]
+                self.assertTrue(instructions)
+                self.assertIn(AGENT_ROLE_CONTRACTS[name], instructions)
+                self.assertEqual(
+                    expected,
+                    (
+                        profile["model"],
+                        profile["model_reasoning_effort"],
+                        profile["sandbox_mode"],
+                    ),
+                )
+
+    def test_platform_mappings_are_template_only(self):
+        for mapping_path in PLATFORM_MAPPING_FILES:
+            with self.subTest(mapping=mapping_path.parent.name):
+                content = mapping_path.read_text()
+                self.assertIn("template-only", content)
+                self.assertNotIn("end-to-end validation", content.lower())
 
 
 if __name__ == "__main__":
