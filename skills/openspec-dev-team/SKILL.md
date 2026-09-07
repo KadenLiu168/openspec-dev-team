@@ -62,15 +62,20 @@ fresh context containing only contract fields and bounded artifact paths.
 4. To resume, select the explicit run-id, read its existing state file, verify
    the saved project and request provenance, and continue from its saved state.
    Never initialize a replacement run. `DONE` and `CANCELLED` are terminal.
+   Before re-dispatching an interrupted normal specialist stage, run
+   `python3 "$TEAM_ROOT/scripts/workflow-state.py" dispatch --state <state>`.
+   It atomically issues a new `ATTEMPT_ID`; old handoffs become stale. Read the
+   returned state and spawn fresh context. Do not use it for gates, blockers,
+   or `PUBLISHING`, which requires receipt reconciliation.
 5. From `NEW`, use `python3 "$TEAM_ROOT/scripts/workflow-state.py" transition
    --state <state> --event START`. Then resolve the current state and expected
    owner from the canonical table.
 
 ## Dispatch inputs
 
-Every specialist receives current `RUN_ID`, `ATTEMPT_ID`, owner, state,
+Every specialist receives `PROJECT_ROOT`, current `RUN_ID`, `ATTEMPT_ID`, owner, state,
 expected output/`NEXT_STATE`, `REQUEST_ARTIFACT`, applicable
-`APPROVAL_ARTIFACT`, bindings, and only these phase inputs:
+`APPROVAL_ARTIFACT` and `APPROVAL_DIGEST`, bindings, and only these phase inputs:
 
 - `EXPLORING`: Read `REQUEST_ARTIFACT` and the minimal artifact inputs needed
   to produce an Explore Result; make no project writes.
@@ -82,7 +87,8 @@ expected output/`NEXT_STATE`, `REQUEST_ARTIFACT`, applicable
   request structured Review Findings.
 - `APPLYING` or `FIXING_IMPLEMENTATION`: supply approved Change inputs,
   applicable findings, quality gates, and direct code paths from the OpenSpec
-  action context.
+  action context. Include current reviewed Change artifact paths in the local
+  commit allowlist alongside implementation and tests; commit them before Audit.
 - `AUDITING`: supply approved Change inputs, implementation handoff, direct
   code paths, and the `BASE..HEAD` diff; request fresh Audit Findings.
 - `PUBLISHING`: supply authorization, Audit bindings, current receipts, and the
@@ -95,7 +101,9 @@ exactly one tasks file:
 python3 "$TEAM_ROOT/scripts/workflow-state.py" digest --input <proposal> --input <design-or-spec> --tasks <tasks>
 ```
 
-Carry both `PROPOSAL_DIGEST` and `PROGRESS_DIGEST` through later handoffs.
+Carry `PROPOSAL_DIGEST` and `PROGRESS_DIGEST` through later handoffs. Proposal/revision may produce new
+proposal/progress digests; Apply/fix may produce new progress and `HEAD_SHA`.
+Review binds its current proposal, and Audit/Publisher bind all audited inputs.
 
 ## Accept, persist, and route
 
@@ -113,6 +121,10 @@ state atomically. A rejected handoff is not persisted and leaves state
 unchanged; report `BLOCKED` with validation evidence instead of guessing or
 dispatching another owner. Never accept a stale attempt. For `STEP_PASS`, use
 the three-command Publishing sequence below instead.
+For `PROPOSAL_CHANGED`, use `STATUS=PASS` and require `SCOPE` to be
+`WITHIN_APPROVED_SCOPE` or `OUTSIDE_APPROVED_SCOPE`; the latter invalidates
+approval and returns to Explore. `NEEDS_HUMAN` uses the same event and status,
+saves `RESUME_STATE`, and follows this same validate-then-transition path.
 
 Continue the serial loop until a Human Gate, terminal state, `BLOCKED`, or
 `NEEDS_HUMAN`. `BLOCKED` never retries automatically. Resume only with new
@@ -140,6 +152,16 @@ Then apply the matching `APPROVE`, `REVISE`, or `REJECT` transition. The
 `APPROVAL_ARTIFACT` binds `EXPLORE_DIGEST`, `PROJECT_REALPATH`, `BRANCH`,
 `REMOTE_URL`, and publish scope. Changed scope invalidates it. Without explicit
 authorization, an Audit PASS stops at `READY_TO_PUBLISH`.
+For explicit later authorization there, preserve the original approval and run:
+
+```text
+python3 "$TEAM_ROOT/scripts/workflow-state.py" authorize-publish --state <state> --evidence <human-decision-file>
+python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --event AUTHORIZE_PUBLISH
+```
+
+The first command persists `PUBLISH_AUTHORIZED` and a `PUBLISH_AUTHORIZATION`
+record bound to the decision's project, approval, and Audit inputs before the
+second enters `PUBLISHING`.
 
 ## Publishing and recovery
 
@@ -168,7 +190,9 @@ or altered receipt is rejected without mutation.
 For unauthorized preflight, accept only a `BLOCKED` handoff at `PREFLIGHT` with
 the unchanged receipt list; no `ARCHIVE_DIGEST` exists yet. Do not record a
 receipt or send `STEP_PASS`. Other invalid authorization or bindings are also
-`BLOCKED`. Archive output containing business code invalidates the Audit PASS
+`BLOCKED`. A blocked `ARCHIVE` needs no digest before its receipt exists; after
+the archive receipt, require its matching digest and the first incomplete step.
+Archive output containing business code invalidates the Audit PASS
 and requires `AUDITING` again.
 
 ## Smoke
@@ -190,5 +214,5 @@ Publisher for unauthorized preflight only; it must return `BLOCKED` and do not
 run archive, commit, push, or Linear actions.
 
 Smoke must not mutate lifecycle or external state: do not run `init`, `approve`,
-`transition`, or `publish-receipt`; do not write artifacts or invoke OpenSpec
+`dispatch`, `authorize-publish`, `transition`, or `publish-receipt`; do not write artifacts or invoke OpenSpec
 archive. Any attempted write fails the smoke diagnostic.

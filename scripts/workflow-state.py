@@ -57,15 +57,34 @@ HANDOFF_FIELDS = (
 
 VALID_STATUSES = {"PASS", "FAIL", "BLOCKED", "NEEDS_HUMAN"}
 PUBLISH_STEPS = ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LINEAR_SYNC", "COMPLETE")
+PUBLISH_AUTHORIZATION_FIELDS = (
+    "RUN_ID", "PROJECT_REALPATH", "BRANCH", "REMOTE_URL", "CHANGE",
+    "APPROVAL_ARTIFACT", "APPROVAL_DIGEST", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
+)
 SPECIALIST_OWNERS = {
     "Explore / Proposal", "Proposal Reviewer", "Apply Executor", "Pre-Archive Auditor", "Archivist / Publisher",
 }
-EVENT_STATUS = {"PASS": "PASS", "FAIL": "FAIL", "BLOCKED": "BLOCKED", "STEP_PASS": "PASS"}
+PROPOSAL_CHANGE_EVENTS = {
+    "PROPOSAL_CHANGED": None,
+    "PROPOSAL_CHANGED_WITHIN_SCOPE": "WITHIN_APPROVED_SCOPE",
+    "PROPOSAL_CHANGED_OUTSIDE_SCOPE": "OUTSIDE_APPROVED_SCOPE",
+}
+EVENT_STATUS = {
+    "PASS": "PASS", "FAIL": "FAIL", "BLOCKED": "BLOCKED", "STEP_PASS": "PASS",
+    "NEEDS_HUMAN": "NEEDS_HUMAN", **{event: "PASS" for event in PROPOSAL_CHANGE_EVENTS},
+}
 BINDING_FIELDS = (
     "CHANGE", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
     "APPROVAL_ARTIFACT", "APPROVAL_DIGEST", "UNTRACKED_BASELINE",
     "EXPLORE_ARTIFACT", "EXPLORE_DIGEST",
 )
+OUTPUT_BINDINGS_BY_STATE = {
+    "EXPLORING": {"EXPLORE_ARTIFACT", "EXPLORE_DIGEST"},
+    "PROPOSING": {"PROPOSAL_DIGEST", "PROGRESS_DIGEST"},
+    "REVISING_PROPOSAL": {"PROPOSAL_DIGEST", "PROGRESS_DIGEST"},
+    "APPLYING": {"PROGRESS_DIGEST", "HEAD_SHA"},
+    "FIXING_IMPLEMENTATION": {"PROGRESS_DIGEST", "HEAD_SHA"},
+}
 RECOVERABLE_STATES = ACTIVE_STATES - {"BLOCKED", "NEEDS_HUMAN"}
 
 
@@ -134,6 +153,8 @@ def next_state(state, event):
     }
     if event == "BLOCKED" and state in ACTIVE_STATES - {"BLOCKED"}:
         return "BLOCKED"
+    if event == "NEEDS_HUMAN" and state in RECOVERABLE_STATES:
+        return "NEEDS_HUMAN"
     if event == "RESOLVED" and state == "BLOCKED":
         return None
     if event == "RESOLVE_BLOCKER" and state == "NEEDS_HUMAN":
@@ -178,6 +199,15 @@ def validate_receipt_progression(existing, proposed, step):
 
 def target_for(state, event, handoff=None):
     current = state.get("STATE")
+    if current == "APPLYING" and event in PROPOSAL_CHANGE_EVENTS:
+        alias_scope = PROPOSAL_CHANGE_EVENTS[event]
+        scope = handoff.get("SCOPE") if handoff else None
+        if alias_scope and scope is not None and scope != alias_scope:
+            raise ValueError("SCOPE does not match proposal-change event")
+        scope = scope or alias_scope
+        if scope not in {"WITHIN_APPROVED_SCOPE", "OUTSIDE_APPROVED_SCOPE"}:
+            raise ValueError("PROPOSAL_CHANGED requires a valid SCOPE")
+        return "REVIEWING_PROPOSAL" if scope == "WITHIN_APPROVED_SCOPE" else "EXPLORING"
     if current == "PUBLISHING" and event == "STEP_PASS":
         if not handoff:
             return None
@@ -216,15 +246,20 @@ def validate_handoff(state, payload, event):
     for requirement in REQUIRED_BY_STATE.get(current, ()):
         if requirement == "PRE_CHANGE":
             for field in ("CHANGE", "PROPOSAL_DIGEST", "PROGRESS_DIGEST"):
-                if payload.get(field) is not None:
+                if state.get("CHANGE"):
+                    if payload.get(field) != state.get(field):
+                        raise ValueError("mismatched %s during re-exploration" % field)
+                elif payload.get(field) is not None:
                     raise ValueError("%s must be null before Change creation" % field)
         elif requirement == "POST_CHANGE":
             for field in ("CHANGE", "PROPOSAL_DIGEST"):
                 if not payload.get(field):
                     raise ValueError("missing %s" % field)
         elif requirement == "HUMAN_GATE":
-            if not payload.get("APPROVAL_ARTIFACT"):
+            if not payload.get("APPROVAL_ARTIFACT") or not payload.get("APPROVAL_DIGEST"):
                 raise ValueError("missing approval binding")
+            if not state.get("APPROVAL_DIGEST") or payload["APPROVAL_DIGEST"] != state["APPROVAL_DIGEST"]:
+                raise ValueError("mismatched APPROVAL_DIGEST")
         elif requirement == "APPLY":
             for field in ("BASE_SHA", "HEAD_SHA", "PROGRESS_DIGEST"):
                 if not payload.get(field):
@@ -248,7 +283,7 @@ def validate_handoff(state, payload, event):
                 if len(receipts) >= len(PUBLISH_STEPS) or step != PUBLISH_STEPS[len(receipts)]:
                     raise ValueError("inconsistent PUBLISH_STEP")
                 archive_index = PUBLISH_STEPS.index("ARCHIVE")
-                if len(receipts) >= archive_index:
+                if len(receipts) > archive_index:
                     archive_digest = payload.get("ARCHIVE_DIGEST")
                     if not archive_digest:
                         raise ValueError("missing ARCHIVE_DIGEST")
@@ -260,7 +295,12 @@ def validate_handoff(state, payload, event):
         digest = payload.get("EXPLORE_DIGEST")
         if not artifact or not digest or not Path(artifact).is_file() or sha256_file(artifact) != digest:
             raise ValueError("missing or invalid Explore binding")
+    output_bindings = OUTPUT_BINDINGS_BY_STATE.get(current, set())
+    if current == "APPLYING" and event in PROPOSAL_CHANGE_EVENTS:
+        output_bindings = output_bindings | {"PROPOSAL_DIGEST"}
     for field in BINDING_FIELDS:
+        if field in output_bindings:
+            continue
         if state.get(field) is not None and payload.get(field) is not None and payload.get(field) != state[field]:
             raise ValueError("mismatched %s" % field)
     if current == "AUDITING" and state.get("UNTRACKED_BASELINE") is not None:
@@ -449,6 +489,43 @@ def publish_receipt_command(args):
     print(json.dumps(state, sort_keys=True))
 
 
+def authorize_publish_command(args):
+    state = read_json(args.state)
+    if state.get("STATE") != "READY_TO_PUBLISH":
+        raise ValueError("publish authorization requires READY_TO_PUBLISH")
+    if any(not state.get(field) for field in PUBLISH_AUTHORIZATION_FIELDS):
+        raise ValueError("publish authorization requires approval, project, and Audit bindings")
+    evidence = Path(args.evidence).resolve()
+    if not evidence.is_file():
+        raise ValueError("explicit publish authorization evidence is required")
+    authorization = {field: state[field] for field in PUBLISH_AUTHORIZATION_FIELDS}
+    authorization["EVIDENCE"] = {"PATH": str(evidence), "DIGEST": sha256_file(evidence)}
+    authorization["AUTHORIZED_AT"] = now()
+    state["PUBLISH_AUTHORIZATION"] = authorization
+    state["PUBLISH_AUTHORIZED"] = True
+    atomic_write(args.state, state)
+    print(json.dumps(state, sort_keys=True))
+
+
+def dispatch_command(args):
+    state = read_json(args.state)
+    current = state.get("STATE")
+    if current == "PUBLISHING" or OWNER_BY_STATE.get(current) not in SPECIALIST_OWNERS:
+        raise ValueError("dispatch requires a normal specialist stage; publishing uses receipts")
+    state["ATTEMPT_ID"] = str(uuid.uuid4())
+    atomic_write(args.state, state)
+    print(json.dumps(state, sort_keys=True))
+
+
+def validate_publish_authorization(state):
+    authorization = state.get("PUBLISH_AUTHORIZATION")
+    if not isinstance(authorization, dict):
+        raise ValueError("missing publish authorization record")
+    for field in PUBLISH_AUTHORIZATION_FIELDS:
+        if authorization.get(field) != state.get(field):
+            raise ValueError("publish authorization binding changed: %s" % field)
+
+
 def validate_recovery(state, event, evidence_path):
     if event == "RESOLVED":
         if state.get("STATE") != "BLOCKED":
@@ -504,7 +581,11 @@ def transition(args):
         target = "PUBLISHING" if state.get("PUBLISH_AUTHORIZED") else "READY_TO_PUBLISH"
     if not target:
         raise ValueError("illegal event %s for state %s" % (event, current))
-    if event == "BLOCKED":
+    if current == "READY_TO_PUBLISH" and event == "AUTHORIZE_PUBLISH":
+        if not state.get("PUBLISH_AUTHORIZED"):
+            raise ValueError("record explicit publish authorization before routing")
+        validate_publish_authorization(state)
+    if event in {"BLOCKED", "NEEDS_HUMAN"}:
         state["RESUME_STATE"] = current
     if recovery:
         state["RESOLUTION_EVIDENCE"] = recovery
@@ -516,6 +597,10 @@ def transition(args):
         if current == "PUBLISHING" and event == "STEP_PASS":
             state["PUBLISH_STEP_RECEIPTS"] = handoff["PUBLISH_STEP_RECEIPTS"]
     state["STATE"] = target
+    if target == "EXPLORING" and current != "EXPLORING":
+        state["APPROVAL_ARTIFACT"] = None
+        state["APPROVAL_DIGEST"] = None
+        state["PUBLISH_AUTHORIZED"] = False
     if current == "REVIEWING_PROPOSAL" and event == "PASS":
         state["PROPOSAL_FAILURE_COUNT"] = 0
     if current == "APPLYING" and event == "PASS":
@@ -535,6 +620,9 @@ def main():
     transition_parser.add_argument("--handoff")
     transition_parser.add_argument("--evidence")
     transition_parser.set_defaults(handler=transition)
+    dispatch_parser = commands.add_parser("dispatch")
+    dispatch_parser.add_argument("--state", required=True)
+    dispatch_parser.set_defaults(handler=dispatch_command)
     handoff_parser = commands.add_parser("validate-handoff")
     handoff_parser.add_argument("--state", required=True)
     handoff_parser.add_argument("--handoff", required=True)
@@ -556,6 +644,10 @@ def main():
     approval_parser.add_argument("--explore-result", required=True)
     approval_parser.add_argument("--publish-authorized", action="store_true")
     approval_parser.set_defaults(handler=approve_command)
+    authorization_parser = commands.add_parser("authorize-publish")
+    authorization_parser.add_argument("--state", required=True)
+    authorization_parser.add_argument("--evidence", required=True)
+    authorization_parser.set_defaults(handler=authorize_publish_command)
     receipt_parser = commands.add_parser("publish-receipt")
     receipt_parser.add_argument("--state", required=True)
     receipt_parser.add_argument("--handoff", required=True)

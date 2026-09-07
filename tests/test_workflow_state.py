@@ -75,7 +75,7 @@ class WorkflowStateHandoffTests(unittest.TestCase):
 
     def write_state(self, state, attempt="attempt-current"):
         self.state_path.write_text(
-            json.dumps({"RUN_ID": "run-1", "STATE": state, "ATTEMPT_ID": attempt}),
+            json.dumps({"RUN_ID": "run-1", "STATE": state, "ATTEMPT_ID": attempt, "APPROVAL_DIGEST": "approval"}),
             encoding="utf-8",
         )
 
@@ -91,6 +91,7 @@ class WorkflowStateHandoffTests(unittest.TestCase):
             "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
         }
         value.update(overrides)
+        value.setdefault("APPROVAL_DIGEST", "approval" if value.get("APPROVAL_ARTIFACT") else None)
         self.handoff_path.write_text(json.dumps(value), encoding="utf-8")
         return value
 
@@ -123,6 +124,7 @@ class WorkflowStateHandoffTests(unittest.TestCase):
         payload = {
             "RUN_ID": "run-1", "ATTEMPT_ID": "attempt-current", "STATUS": "PASS",
             "CHANGE": "sample-change", "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": "approval.json",
+            "APPROVAL_DIGEST": "approval",
             "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
             "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress", "BASE_SHA": "base",
             "HEAD_SHA": "head", "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AUDITING", "OWNER": "Apply Executor",
@@ -290,6 +292,7 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
             "RUN_ID": "run-1", "STATE": "PUBLISHING", "ATTEMPT_ID": "attempt-1",
             "CHANGE": "change", "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress",
             "BASE_SHA": "base", "HEAD_SHA": "head", "APPROVAL_ARTIFACT": "approval.json",
+            "APPROVAL_DIGEST": "approval",
             "REMOTE_URL": "https://example.test/repo.git", "PUBLISH_STEP_RECEIPTS": [],
         }
         state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -306,6 +309,7 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
         skipped_handoff = {
             "RUN_ID": "run-1", "ATTEMPT_ID": "attempt-1", "STATUS": "PASS", "CHANGE": "change",
             "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": "approval.json",
+            "APPROVAL_DIGEST": "approval",
             "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
             "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress", "BASE_SHA": "base",
             "HEAD_SHA": "head", "PUBLISH_STEP_RECEIPTS": [skipped_receipt],
@@ -343,6 +347,7 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
                 "RUN_ID": "run-1", "ATTEMPT_ID": saved["ATTEMPT_ID"], "STATUS": "PASS",
                 "CHANGE": "change", "REQUEST_ARTIFACT": "request.md",
                 "APPROVAL_ARTIFACT": "approval.json", "SUMMARY": "summary", "EVIDENCE": [],
+                "APPROVAL_DIGEST": "approval",
                 "BLOCKERS": [], "ARTIFACTS": [], "PROPOSAL_DIGEST": "proposal",
                 "PROGRESS_DIGEST": "progress", "BASE_SHA": "base", "HEAD_SHA": "head",
                 "PUBLISH_STEP_RECEIPTS": receipts + [receipt],
@@ -400,7 +405,7 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPT), *arguments], text=True, capture_output=True)
 
     def write_state(self, **values):
-        state = {"RUN_ID": "run-1", "STATE": "EXPLORING", "ATTEMPT_ID": "attempt-1"}
+        state = {"RUN_ID": "run-1", "STATE": "EXPLORING", "ATTEMPT_ID": "attempt-1", "APPROVAL_DIGEST": "approval"}
         state.update(values)
         self.state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
 
@@ -416,6 +421,7 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
             "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
         }
         payload.update(overrides)
+        payload.setdefault("APPROVAL_DIGEST", "approval" if payload.get("APPROVAL_ARTIFACT") else None)
         self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
 
     def transition(self, event, handoff=True, *extra):
@@ -492,7 +498,6 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         preflight = {"STEP": "PREFLIGHT"}
         archive = {"STEP": "ARCHIVE", "ARCHIVE_DIGEST": "archive"}
         cases = (
-            ("archive step missing digest", [preflight], "ARCHIVE", None, "missing ARCHIVE_DIGEST"),
             ("post-archive missing digest", [preflight, archive], "VALIDATE", None, "missing ARCHIVE_DIGEST"),
             ("post-archive wrong digest", [preflight, archive], "VALIDATE", "other", "mismatched ARCHIVE_DIGEST"),
             ("post-archive claims preflight", [preflight, archive], "PREFLIGHT", "archive", "inconsistent PUBLISH_STEP"),
@@ -589,12 +594,12 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
                          APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval-a")
         self.handoff(OWNER="Apply Executor", CHANGE="change", PROPOSAL_DIGEST="proposal-b",
                      PROGRESS_DIGEST="progress-a", BASE_SHA="base-a", HEAD_SHA="head-a",
-                     APPROVAL_ARTIFACT="approval.json", NEXT_STATE="AUDITING")
+                     APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval-a", NEXT_STATE="AUDITING")
         before = self.state_path.read_bytes()
         self.assert_json_error_and_unchanged(self.transition("PASS"), before)
         self.handoff(OWNER="Apply Executor", CHANGE="change", PROPOSAL_DIGEST="proposal-a",
                      PROGRESS_DIGEST="progress-a", BASE_SHA="base-a", HEAD_SHA="head-a",
-                     APPROVAL_ARTIFACT="approval.json", NEXT_STATE="AUDITING")
+                     APPROVAL_ARTIFACT="approval.json", APPROVAL_DIGEST="approval-a", NEXT_STATE="AUDITING")
         result = self.transition("PASS")
         self.assertEqual(result.returncode, 0, result.stderr)
         persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -803,6 +808,312 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
             "--step", "PREFLIGHT", "--result-file", str(result_file), "--archive-digest", "different",
         )
         self.assert_json_error_and_unchanged(result, before)
+
+
+class WorkflowStateFinalRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state_path = self.root / "state.json"
+        self.handoff_path = self.root / "handoff.json"
+
+    def invoke(self, command, *arguments):
+        return subprocess.run([sys.executable, str(SCRIPT), command, "--state", str(self.state_path),
+                               *arguments], text=True, capture_output=True)
+
+    def stage(self, current, **overrides):
+        state = {
+            "RUN_ID": "run-final", "STATE": current, "ATTEMPT_ID": "attempt-old",
+            "CHANGE": "change", "REQUEST_ARTIFACT": "request.md",
+            "APPROVAL_ARTIFACT": "approval.json", "APPROVAL_DIGEST": "approval",
+            "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress",
+            "BASE_SHA": "base", "HEAD_SHA": "head", "UNTRACKED_BASELINE": ["user.db"],
+            "PUBLISH_STEP_RECEIPTS": [], "PUBLISH_AUTHORIZED": False,
+        }
+        state.update(overrides)
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        return state
+
+    def candidate(self, owner, target, **overrides):
+        state = json.loads(self.state_path.read_text())
+        payload = {
+            field: state.get(field) for field in (
+                "RUN_ID", "ATTEMPT_ID", "CHANGE", "REQUEST_ARTIFACT", "APPROVAL_ARTIFACT",
+                "APPROVAL_DIGEST", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
+                "UNTRACKED_BASELINE", "PUBLISH_STEP_RECEIPTS",
+            )
+        }
+        payload.update(OWNER=owner, STATUS="PASS", NEXT_STATE=target,
+                       SUMMARY="result", EVIDENCE=[], BLOCKERS=[], ARTIFACTS=[])
+        payload.update(overrides)
+        self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def accept(self, event="PASS"):
+        for command in ("validate-handoff", "transition"):
+            result = self.invoke(command, "--event", event, "--handoff", str(self.handoff_path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(self.state_path.read_text())
+
+    def reject(self, event="PASS", error=None):
+        before = self.state_path.read_bytes()
+        for command in ("validate-handoff", "transition"):
+            result = self.invoke(command, "--event", event, "--handoff", str(self.handoff_path))
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            if error:
+                self.assertIn(error, json.loads(result.stderr)["error"])
+            self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_apply_and_fix_accept_new_progress_and_committed_head(self):
+        for current in ("APPLYING", "FIXING_IMPLEMENTATION"):
+            with self.subTest(current=current):
+                self.stage(current)
+                self.candidate("Apply Executor", "AUDITING", HEAD_SHA="new-head", PROGRESS_DIGEST="completed")
+                saved = self.accept()
+                self.assertEqual(saved["HEAD_SHA"], "new-head")
+                self.assertEqual(saved["PROGRESS_DIGEST"], "completed")
+                self.assertEqual(saved["PROPOSAL_DIGEST"], "proposal")
+                self.candidate("Pre-Archive Auditor", "READY_TO_PUBLISH")
+                self.assertEqual(self.accept()["STATE"], "READY_TO_PUBLISH")
+
+    def test_revision_updates_proposal_before_rereview(self):
+        self.stage("REVISING_PROPOSAL")
+        self.candidate("Explore / Proposal", "REVIEWING_PROPOSAL",
+                       PROPOSAL_DIGEST="revised", PROGRESS_DIGEST="revised-tasks")
+        saved = self.accept()
+        self.assertEqual(saved["PROPOSAL_DIGEST"], "revised")
+        self.candidate("Proposal Reviewer", "APPLYING")
+        self.assertEqual(self.accept()["PROPOSAL_DIGEST"], "revised")
+
+    def test_revise_explore_accepts_new_result_and_invalidates_old_approval(self):
+        old_result = self.root / "old.md"
+        new_result = self.root / "new.md"
+        old_result.write_text("old direction")
+        new_result.write_text("new direction")
+        self.stage("AWAITING_EXPLORE_APPROVAL", CHANGE=None, PROPOSAL_DIGEST=None, PROGRESS_DIGEST=None,
+                   EXPLORE_ARTIFACT=str(old_result), EXPLORE_DIGEST=hashlib.sha256(old_result.read_bytes()).hexdigest(),
+                   PUBLISH_AUTHORIZED=True)
+        result = self.invoke("transition", "--event", "REVISE")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.candidate("Explore / Proposal", "AWAITING_EXPLORE_APPROVAL",
+                       EXPLORE_ARTIFACT=str(new_result), EXPLORE_DIGEST=hashlib.sha256(new_result.read_bytes()).hexdigest())
+        saved = self.accept()
+        self.assertEqual(saved["EXPLORE_ARTIFACT"], str(new_result))
+        self.assertIsNone(saved["APPROVAL_DIGEST"])
+        self.assertIsNone(saved["APPROVAL_ARTIFACT"])
+        self.assertFalse(saved["PUBLISH_AUTHORIZED"])
+
+    def test_nonproducing_stages_reject_changed_bindings(self):
+        cases = (
+            ("APPLYING", "Apply Executor", "AUDITING", "PROPOSAL_DIGEST"),
+            ("FIXING_IMPLEMENTATION", "Apply Executor", "AUDITING", "BASE_SHA"),
+            ("REVIEWING_PROPOSAL", "Proposal Reviewer", "APPLYING", "PROPOSAL_DIGEST"),
+            ("AUDITING", "Pre-Archive Auditor", "READY_TO_PUBLISH", "PROPOSAL_DIGEST"),
+            ("AUDITING", "Pre-Archive Auditor", "READY_TO_PUBLISH", "PROGRESS_DIGEST"),
+            ("AUDITING", "Pre-Archive Auditor", "READY_TO_PUBLISH", "HEAD_SHA"),
+            ("PUBLISHING", "Archivist / Publisher", "BLOCKED", "HEAD_SHA"),
+            ("PUBLISHING", "Archivist / Publisher", "BLOCKED", "PROGRESS_DIGEST"),
+        )
+        for current, owner, target, field in cases:
+            with self.subTest(current=current, field=field):
+                self.stage(current)
+                extra = {"STATUS": "BLOCKED", "PUBLISH_STEP": "PREFLIGHT"} if current == "PUBLISHING" else {}
+                self.candidate(owner, target, **{field: "changed"}, **extra)
+                self.reject("BLOCKED" if current == "PUBLISHING" else "PASS", "mismatched " + field)
+
+    def test_proposal_changed_handoffs_route_both_scopes_and_legacy_aliases(self):
+        cases = (
+            ("PROPOSAL_CHANGED", "WITHIN_APPROVED_SCOPE", "REVIEWING_PROPOSAL"),
+            ("PROPOSAL_CHANGED", "OUTSIDE_APPROVED_SCOPE", "EXPLORING"),
+            ("PROPOSAL_CHANGED_WITHIN_SCOPE", None, "REVIEWING_PROPOSAL"),
+            ("PROPOSAL_CHANGED_OUTSIDE_SCOPE", None, "EXPLORING"),
+        )
+        for event, scope, target in cases:
+            with self.subTest(event=event, scope=scope):
+                self.stage("APPLYING", PUBLISH_AUTHORIZED=True)
+                self.candidate("Apply Executor", target, SCOPE=scope, PROPOSAL_DIGEST="changed-proposal")
+                saved = self.accept(event)
+                self.assertEqual(saved["STATE"], target)
+                self.assertEqual(saved["PROPOSAL_DIGEST"], "changed-proposal")
+                if target == "REVIEWING_PROPOSAL":
+                    self.candidate("Proposal Reviewer", "APPLYING")
+                    self.assertEqual(self.accept()["STATE"], "APPLYING")
+                else:
+                    self.assertIsNone(saved["APPROVAL_DIGEST"])
+                    self.assertFalse(saved["PUBLISH_AUTHORIZED"])
+                    explore = self.root / "scope.md"
+                    explore.write_text("reconsidered direction")
+                    self.candidate("Explore / Proposal", "AWAITING_EXPLORE_APPROVAL",
+                                   EXPLORE_ARTIFACT=str(explore), EXPLORE_DIGEST=hashlib.sha256(explore.read_bytes()).hexdigest())
+                    self.assertEqual(self.accept()["CHANGE"], "change")
+
+    def test_proposal_changed_rejects_invalid_scope_status_and_owner(self):
+        for overrides in ({"SCOPE": None}, {"SCOPE": "unknown"}, {"STATUS": "NEEDS_HUMAN"},
+                          {"OWNER": "Proposal Reviewer"}, {"NEXT_STATE": "AUDITING"}):
+            with self.subTest(overrides=overrides):
+                self.stage("APPLYING")
+                values = {"SCOPE": "WITHIN_APPROVED_SCOPE", "PROPOSAL_DIGEST": "changed", **overrides}
+                self.candidate(values.pop("OWNER", "Apply Executor"),
+                               values.pop("NEXT_STATE", "REVIEWING_PROPOSAL"), **values)
+                self.reject("PROPOSAL_CHANGED")
+        self.stage("APPLYING")
+        self.candidate("Apply Executor", "EXPLORING", SCOPE="OUTSIDE_APPROVED_SCOPE")
+        self.reject("PROPOSAL_CHANGED_WITHIN_SCOPE")
+
+    def test_needs_human_handoff_preserves_recoverable_stage(self):
+        for current, owner in (("EXPLORING", "Explore / Proposal"), ("APPLYING", "Apply Executor"),
+                               ("AUDITING", "Pre-Archive Auditor")):
+            with self.subTest(current=current):
+                extra = {"CHANGE": None, "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None} if current == "EXPLORING" else {}
+                self.stage(current, **extra)
+                self.candidate(owner, "NEEDS_HUMAN", STATUS="NEEDS_HUMAN", BLOCKERS=["human decision required"])
+                saved = self.accept("NEEDS_HUMAN")
+                self.assertEqual(saved["STATE"], "NEEDS_HUMAN")
+                self.assertEqual(saved["RESUME_STATE"], current)
+                evidence = self.root / "decision.md"
+                evidence.write_text("human resolved the decision")
+                result = self.invoke("transition", "--event", "RESOLVE_BLOCKER", "--evidence", str(evidence))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["STATE"], current)
+
+    def test_post_gate_handoffs_require_the_saved_approval_digest(self):
+        stages = (
+            ("PROPOSING", "Explore / Proposal", "REVIEWING_PROPOSAL"),
+            ("REVISING_PROPOSAL", "Explore / Proposal", "REVIEWING_PROPOSAL"),
+            ("REVIEWING_PROPOSAL", "Proposal Reviewer", "APPLYING"),
+            ("APPLYING", "Apply Executor", "AUDITING"),
+            ("FIXING_IMPLEMENTATION", "Apply Executor", "AUDITING"),
+            ("AUDITING", "Pre-Archive Auditor", "READY_TO_PUBLISH"),
+            ("PUBLISHING", "Archivist / Publisher", "BLOCKED"),
+        )
+        for current, owner, target in stages:
+            for digest in (None, "", "changed", "absent"):
+                with self.subTest(current=current, digest=digest):
+                    self.stage(current)
+                    extra = {"STATUS": "BLOCKED", "PUBLISH_STEP": "PREFLIGHT"} if current == "PUBLISHING" else {}
+                    payload = self.candidate(owner, target, APPROVAL_DIGEST=digest, **extra)
+                    if digest == "absent":
+                        del payload["APPROVAL_DIGEST"]
+                        self.handoff_path.write_text(json.dumps(payload))
+                    self.reject("BLOCKED" if current == "PUBLISHING" else "PASS")
+        self.stage("PROPOSING", APPROVAL_DIGEST=None)
+        self.candidate("Explore / Proposal", "REVIEWING_PROPOSAL", APPROVAL_DIGEST="unapproved")
+        self.reject()
+
+    def test_later_publish_authorization_is_bound_and_persisted_before_routing(self):
+        approval = self.root / "approval.json"
+        approval.write_text('{"PUBLISH_AUTHORIZED": false}')
+        evidence = self.root / "publish-decision.md"
+        evidence.write_text("User explicitly authorized publishing this audited Change")
+        initial = self.stage("AUDITING", PROJECT_REALPATH=str(self.root), BRANCH="main",
+                             REMOTE_URL="https://example.test/repo.git", APPROVAL_ARTIFACT=str(approval),
+                             APPROVAL_DIGEST=hashlib.sha256(approval.read_bytes()).hexdigest())
+        self.candidate("Pre-Archive Auditor", "READY_TO_PUBLISH")
+        self.accept()
+        result = self.invoke("authorize-publish", "--evidence", str(evidence))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        authorized = json.loads(result.stdout)
+        self.assertEqual(authorized["STATE"], "READY_TO_PUBLISH")
+        self.assertTrue(authorized["PUBLISH_AUTHORIZED"])
+        self.assertEqual(authorized["APPROVAL_DIGEST"], initial["APPROVAL_DIGEST"])
+        self.assertEqual(approval.read_text(), '{"PUBLISH_AUTHORIZED": false}')
+        record = authorized["PUBLISH_AUTHORIZATION"]
+        for field in ("RUN_ID", "PROJECT_REALPATH", "BRANCH", "REMOTE_URL", "CHANGE", "APPROVAL_DIGEST",
+                      "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA"):
+            self.assertEqual(record[field], initial[field])
+        self.assertEqual(record["EVIDENCE"]["DIGEST"], hashlib.sha256(evidence.read_bytes()).hexdigest())
+        self.assertIn("AUTHORIZED_AT", record)
+        result = self.invoke("transition", "--event", "AUTHORIZE_PUBLISH")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["STATE"], "PUBLISHING")
+        self.assertTrue(json.loads(result.stdout)["PUBLISH_AUTHORIZED"])
+
+    def test_later_publish_authorization_requires_ready_state_evidence_and_bindings(self):
+        evidence = self.root / "decision.md"
+        evidence.write_text("publish")
+        for current, overrides, artifact in (
+            ("READY_TO_PUBLISH", {}, self.root / "missing.md"),
+            ("APPLYING", {}, evidence),
+            ("PUBLISHING", {}, evidence),
+            ("READY_TO_PUBLISH", {"APPROVAL_DIGEST": None}, evidence),
+            ("READY_TO_PUBLISH", {"HEAD_SHA": None}, evidence),
+        ):
+            with self.subTest(current=current, overrides=overrides):
+                self.stage(current, PROJECT_REALPATH=str(self.root), BRANCH="main",
+                           REMOTE_URL="https://example.test/repo.git", **overrides)
+                before = self.state_path.read_bytes()
+                result = self.invoke("authorize-publish", "--evidence", str(artifact))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.state_path.read_bytes(), before)
+        self.stage("READY_TO_PUBLISH")
+        before = self.state_path.read_bytes()
+        result = self.invoke("transition", "--event", "AUTHORIZE_PUBLISH")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_later_authorization_rejects_changed_scope_before_publishing(self):
+        evidence = self.root / "decision.md"
+        evidence.write_text("publish this audited Change")
+        for field in ("HEAD_SHA", "PROGRESS_DIGEST", "PROPOSAL_DIGEST", "APPROVAL_DIGEST", "BRANCH", "REMOTE_URL"):
+            with self.subTest(field=field):
+                self.stage("READY_TO_PUBLISH", PROJECT_REALPATH=str(self.root), BRANCH="main",
+                           REMOTE_URL="https://example.test/repo.git")
+                result = self.invoke("authorize-publish", "--evidence", str(evidence))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                changed = json.loads(result.stdout)
+                changed[field] = "different"
+                self.state_path.write_text(json.dumps(changed))
+                before = self.state_path.read_bytes()
+                result = self.invoke("transition", "--event", "AUTHORIZE_PUBLISH")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_archive_can_block_before_any_archive_receipt_or_digest_exists(self):
+        receipts = [{"STEP": "PREFLIGHT"}]
+        self.stage("PUBLISHING", PUBLISH_STEP_RECEIPTS=receipts)
+        self.candidate("Archivist / Publisher", "BLOCKED", STATUS="BLOCKED", PUBLISH_STEP="ARCHIVE",
+                       ARCHIVE_DIGEST=None, BLOCKERS=["archive command unavailable"])
+        saved = self.accept("BLOCKED")
+        self.assertEqual(saved["RESUME_STATE"], "PUBLISHING")
+        self.assertEqual(saved["PUBLISH_STEP_RECEIPTS"], receipts)
+
+    def test_resume_dispatch_rotates_normal_attempt_and_rejects_old_handoffs(self):
+        stages = (
+            ("EXPLORING", "Explore / Proposal", "AWAITING_EXPLORE_APPROVAL"),
+            ("PROPOSING", "Explore / Proposal", "REVIEWING_PROPOSAL"),
+            ("REVISING_PROPOSAL", "Explore / Proposal", "REVIEWING_PROPOSAL"),
+            ("REVIEWING_PROPOSAL", "Proposal Reviewer", "APPLYING"),
+            ("APPLYING", "Apply Executor", "AUDITING"),
+            ("FIXING_IMPLEMENTATION", "Apply Executor", "AUDITING"),
+            ("AUDITING", "Pre-Archive Auditor", "READY_TO_PUBLISH"),
+        )
+        explore = self.root / "explore.md"
+        explore.write_text("direction")
+        for current, owner, target in stages:
+            with self.subTest(current=current):
+                initial = self.stage(current)
+                extra = {"EXPLORE_ARTIFACT": str(explore), "EXPLORE_DIGEST": hashlib.sha256(explore.read_bytes()).hexdigest()}
+                self.candidate(owner, target, **extra)
+                result = self.invoke("dispatch")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                dispatched = json.loads(result.stdout)
+                uuid.UUID(dispatched["ATTEMPT_ID"])
+                self.assertNotEqual(dispatched["ATTEMPT_ID"], initial["ATTEMPT_ID"])
+                self.assertEqual({**dispatched, "ATTEMPT_ID": initial["ATTEMPT_ID"]}, initial)
+                self.reject(error="stale ATTEMPT_ID")
+                self.candidate(owner, target, **extra)
+                self.assertEqual(self.accept()["STATE"], target)
+
+    def test_dispatch_cannot_bypass_gates_blockers_or_publish_receipts(self):
+        for current in ("NEW", "AWAITING_EXPLORE_APPROVAL", "READY_TO_PUBLISH", "PUBLISHING",
+                        "BLOCKED", "NEEDS_HUMAN", "DONE", "CANCELLED"):
+            with self.subTest(current=current):
+                self.stage(current)
+                before = self.state_path.read_bytes()
+                result = self.invoke("dispatch")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.state_path.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,9 @@ approval artifact bound to the Explore Result digest, project realpath, branch,
 remote, and publish authorization. Changing the result or that scope invalidates
 the approval. Without authorization, a passing Audit stops at
 `READY_TO_PUBLISH`.
+Explicit later authorization may be recorded there with `authorize-publish`,
+bound to the current project, approval digest, and audited inputs; it preserves
+the original Human Gate artifact before the `AUTHORIZE_PUBLISH` transition.
 
 ## Project and Git Boundaries
 
@@ -25,8 +28,14 @@ At run start, record `BASE_SHA` and the non-ignored untracked baseline. Staged
 or tracked dirty changes require `NEEDS_HUMAN`. Pre-existing non-ignored
 untracked files are preserved and never staged, deleted, or overwritten.
 
-Apply commits only its implementation, tests, and OpenSpec task progress using
-an explicit file allowlist, and does not push. Before Audit, tracked worktree
+Apply owns the local commit of its implementation, tests, and the current
+approved Change artifacts (proposal, design, delta specs, and tasks), using an
+explicit file allowlist resolved from supplied OpenSpec status/instructions.
+Recompute `PROPOSAL_DIGEST` and require it to match the latest Proposal Review
+PASS before staging those artifacts; only task checkbox progress may differ.
+Exclude baseline untracked files, unrelated changes, and runtime evidence.
+Explore/Proposal and Reviewer never stage or commit. Apply does not push.
+Before Audit, tracked worktree
 and index must be clean and there must be no non-baseline non-ignored untracked
 files. Publisher repeats those checks, along with branch, remote, Audit binding,
 HEAD, and digests.
@@ -57,3 +66,6 @@ and log path only.
 has new evidence that validates the saved `resume_state`. Proposal review and
 Audit each allow at most two automatic remediation rounds; a third blocking
 finding routes to `NEEDS_HUMAN`.
+An interrupted normal stage uses `dispatch --state` to persist a new
+`ATTEMPT_ID` before fresh re-dispatch; prior attempts are stale. Publishing
+resumes only through receipts, and blockers require resolution evidence.

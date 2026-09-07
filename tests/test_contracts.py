@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -144,6 +146,42 @@ class ContractTests(unittest.TestCase):
                 self.assertIn("template-only", content)
                 self.assertNotIn("end-to-end validation", content.lower())
 
+    def test_profile_contract_paths_are_readable_from_bootstrapped_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
+            subprocess.run([str(ROOT / "scripts/link-project.sh"), str(project)],
+                           check=True, capture_output=True)
+            for name, role_path in AGENT_ROLE_CONTRACTS.items():
+                with self.subTest(agent=name):
+                    profile = tomllib.loads((CODEX_AGENTS / f"{name}.toml").read_text())
+                    opening = profile["developer_instructions"].split("Outside those fixed contracts", 1)[0]
+                    paths = re.findall(r"(?<![\w/])\.?agents/[\w/.-]+\.md", opening)
+                    self.assertEqual(len(paths), 4)
+                    resolved = [(project / path).resolve() for path in paths]
+                    self.assertEqual(resolved[:3], [
+                        ROOT / "agents/shared/workflow-policy.md",
+                        ROOT / "agents/shared/handoff-contract.md",
+                        ROOT / role_path,
+                    ])
+                    for path in resolved:
+                        self.assertTrue(path.read_text().strip())
+
+    def test_apply_owns_commit_of_current_reviewed_change_artifacts(self):
+        profile = tomllib.loads((CODEX_AGENTS / "openspec-apply-executor.toml").read_text())
+        for content in (
+            WORKFLOW_POLICY.read_text(), (ROOT / "agents/team/apply-executor.md").read_text(),
+            profile["developer_instructions"],
+        ):
+            with self.subTest(contract=content.splitlines()[0]):
+                self.assertIn("approved Change artifacts (proposal, design, delta specs, and tasks)",
+                              " ".join(content.split()))
+                self.assertIn("PROPOSAL_DIGEST", content)
+                self.assertIn("allowlist", content)
+        for name in ("openspec-explore-proposal", "openspec-proposal-reviewer", "openspec-pre-archive-auditor"):
+            instructions = tomllib.loads((CODEX_AGENTS / f"{name}.toml").read_text())["developer_instructions"]
+            self.assertIn("Git write allowlist: none.", instructions)
+
 
 class OrchestrationDocumentationTests(unittest.TestCase):
     def read_document(self, path):
@@ -229,6 +267,19 @@ class OrchestrationDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
+
+    def test_skill_documents_recovery_authorization_and_canonical_events(self):
+        content = self.read_document(SKILL)
+        for command in ("dispatch --state", "authorize-publish --state"):
+            self.assertIn(command, content)
+        for field in ("PROJECT_ROOT", "APPROVAL_DIGEST", "PROPOSAL_CHANGED", "WITHIN_APPROVED_SCOPE",
+                      "OUTSIDE_APPROVED_SCOPE", "SCOPE", "NEEDS_HUMAN"):
+            self.assertIn(field, content)
+        self.assertIn("new `ATTEMPT_ID`", content)
+        self.assertIn("AUTHORIZE_PUBLISH", content)
+        self.assertIn("PUBLISH_AUTHORIZATION", content)
+        publisher_profile = (CODEX_AGENTS / "openspec-archivist-publisher.toml").read_text()
+        self.assertIn("PUBLISH_AUTHORIZATION", publisher_profile)
 
     def test_skill_supplies_bounded_openspec_and_review_inputs(self):
         content = self.read_document(SKILL)

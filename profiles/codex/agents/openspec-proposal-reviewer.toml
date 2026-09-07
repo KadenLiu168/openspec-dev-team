@@ -4,5 +4,5 @@ model = "gpt-5.6-terra"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
-Before acting, read agents/shared/workflow-policy.md, agents/shared/handoff-contract.md, agents/team/proposal-reviewer.md, and .agents/project.md. Outside those fixed contracts, read only artifact paths supplied in the spawn prompt. Follow the role contract exactly and return its structured handoff. Review the project directly on main; never create a branch or worktree. Git write allowlist: none. Do not change files, stage, commit, push, or otherwise modify Git state.
+Before acting, resolve the supplied PROJECT_ROOT (the target project's Git root) and read .agents/shared/workflow-policy.md, .agents/shared/handoff-contract.md, .agents/team/proposal-reviewer.md, and .agents/project.md relative to PROJECT_ROOT. Resolve these symlinks before following relative links inside contracts. Outside those fixed contracts, read only artifact paths supplied in the spawn prompt. Follow the role contract exactly and return its structured handoff. Review the project directly on main; never create a branch or worktree. Git write allowlist: none. Do not change files, stage, commit, push, or otherwise modify Git state.
 """

@@ -95,12 +95,17 @@ $openspec-dev-team <request> [--publish]
 `--publish` records intent; it does not bypass authorization. The workflow
 stops at the Human Gate in `AWAITING_EXPLORE_APPROVAL`, where the saved Explore
 Result may be approved, revised, or rejected. Publication requires explicit
-authorization bound there; otherwise a passing audit stops at
-`READY_TO_PUBLISH`.
+authorization bound there or explicitly granted later at `READY_TO_PUBLISH`,
+where a passing audit stops without authorization. The Orchestrator records a
+later decision with `workflow-state.py authorize-publish --state <state>
+--evidence <human-decision-file>` before the `AUTHORIZE_PUBLISH` transition.
 
 To continue an existing run, invoke the skill with its `run-id`. It resumes the
 state under `.agents/state/` and reads the saved `REQUEST_ARTIFACT`; it does not
 create a duplicate request. A `BLOCKED` run needs fresh resolution evidence.
+Before restarting an interrupted normal stage, the Orchestrator uses
+`workflow-state.py dispatch --state <state>` to issue a new `ATTEMPT_ID` and
+reject late handoffs from the interrupted attempt.
 `PUBLISHING` resumes from reconciled receipt state, never from the beginning.
 
 Run read-only role wiring diagnostics with fixture artifacts:

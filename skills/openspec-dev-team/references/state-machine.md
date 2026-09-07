@@ -47,6 +47,7 @@ instead of copying it. The Orchestrator enforces expected owner and transition.
 | `FIXING_IMPLEMENTATION` | `PASS` | `AUDITING` |
 | `READY_TO_PUBLISH` | `AUTHORIZE_PUBLISH` | `PUBLISHING` |
 | `Any active state` | `BLOCKED` | `BLOCKED` |
+| `Any normal active state` | `NEEDS_HUMAN` | `NEEDS_HUMAN` |
 | `BLOCKED` | `RESOLVED` | `validated resume_state` |
 | `NEEDS_HUMAN` | `RETRY_PROPOSAL` | `REVISING_PROPOSAL` |
 | `NEEDS_HUMAN` | `RETRY_IMPLEMENTATION` | `FIXING_IMPLEMENTATION` |
@@ -59,6 +60,20 @@ instead of copying it. The Orchestrator enforces expected owner and transition.
 `RESOLVE_BLOCKER` requires new evidence that validates that state. Proposal
 review and Audit have at most two automatic remediation rounds; the third
 blocking finding moves to `NEEDS_HUMAN`.
+
+`PROPOSAL_CHANGED` uses handoff `STATUS=PASS` and requires
+`SCOPE=WITHIN_APPROVED_SCOPE` or `SCOPE=OUTSIDE_APPROVED_SCOPE`. The two legacy
+scope-specific event aliases remain accepted. Re-entering Explore clears the
+approval and publish authorization before a new Human Gate. An explicit
+`NEEDS_HUMAN` event/status saves the current stage as `RESUME_STATE`.
+
+At `READY_TO_PUBLISH`, `authorize-publish --state <state> --evidence <file>`
+records explicit human authorization bound to the current project, approval,
+and audited inputs; then `AUTHORIZE_PUBLISH` can enter `PUBLISHING`.
+An interrupted normal specialist stage uses `dispatch --state <state>` before
+re-dispatch to atomically issue a new `ATTEMPT_ID`. This keeps the stage and all
+bindings while rejecting old handoffs. Gates, blockers, terminal states, and
+Publishing cannot use this dispatch command.
 
 ## Publishing steps
 

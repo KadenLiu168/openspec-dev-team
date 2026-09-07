@@ -17,8 +17,14 @@ project quality-gate configuration, and Git status/SHA facts.
 
 ## WRITE
 
-Write only required business code, tests, OpenSpec task completion progress, and
-the local implementation commit using an explicit allowlist.
+Write only required business code, tests, and OpenSpec task completion progress.
+Own the local implementation commit, including the current approved Change
+artifacts (proposal, design, delta specs, and tasks) created by Explore/Proposal.
+Resolve their explicit file allowlist from supplied OpenSpec status/instructions;
+before staging, recompute `PROPOSAL_DIGEST` and match the latest Proposal Review
+PASS. Include only reviewed artifact content and task checkbox progress, preserve
+baseline untracked files, and exclude unrelated changes and runtime evidence.
+Commit this entire allowlist before returning to Audit.
 
 ## FORBIDDEN
 
@@ -35,5 +41,8 @@ required next state.
 ## Escalation
 
 Return `BLOCKED` for unavailable dependency, unsafe working tree, or failed
-required tool. Return `NEEDS_HUMAN` for changed approved scope or a third audit
-finding; route proposal changes through the state machine.
+required tool. For changed proposal/design/delta specs/task text, return event
+`PROPOSAL_CHANGED`, `STATUS=PASS`, and the new digest with
+`SCOPE=WITHIN_APPROVED_SCOPE` or `OUTSIDE_APPROVED_SCOPE`; stop implementation
+until review or the new Human Gate succeeds. Return `NEEDS_HUMAN` for a human
+decision that cannot be resolved from the approved artifacts.
