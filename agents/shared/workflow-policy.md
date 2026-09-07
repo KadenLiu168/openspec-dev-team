@@ -14,7 +14,10 @@ fields. The workflow is serial.
 There is one default active Human Gate: after Explore. The Orchestrator writes
 request provenance before Explore, then records the human decision in an
 approval artifact bound to the Explore Result digest, project realpath, branch,
-remote, and publish authorization. Changing the result or that scope invalidates
+remote, and publish authorization. Gate-time publish authorization also creates
+a `PUBLISH_AUTHORIZATION` record bound to the untracked baseline; Audit PASS
+completes its Change/digest/SHA fields and validates the saved scope before
+routing directly to Publishing. Changing the result or that scope invalidates
 the approval. Without authorization, a passing Audit stops at
 `READY_TO_PUBLISH`.
 Explicit later authorization may be recorded there with `authorize-publish`,

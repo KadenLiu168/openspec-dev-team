@@ -60,6 +60,7 @@ PUBLISH_STEPS = ("PREFLIGHT", "ARCHIVE", "VALIDATE", "FINAL_COMMIT", "PUSH", "LI
 PUBLISH_AUTHORIZATION_FIELDS = (
     "RUN_ID", "PROJECT_REALPATH", "BRANCH", "REMOTE_URL", "CHANGE",
     "APPROVAL_ARTIFACT", "APPROVAL_DIGEST", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
+    "UNTRACKED_BASELINE",
 )
 SPECIALIST_OWNERS = {
     "Explore / Proposal", "Proposal Reviewer", "Apply Executor", "Pre-Archive Auditor", "Archivist / Publisher",
@@ -434,6 +435,13 @@ def approve_command(args):
     state["APPROVAL_DIGEST"] = sha256_file(approval_path)
     state["EXPLORE_DIGEST"] = approval["EXPLORE_DIGEST"]
     state["PUBLISH_AUTHORIZED"] = approval["PUBLISH_AUTHORIZED"]
+    if approval["PUBLISH_AUTHORIZED"]:
+        authorization = {field: state.get(field) for field in PUBLISH_AUTHORIZATION_FIELDS}
+        authorization["EVIDENCE"] = {"PATH": str(approval_path), "DIGEST": state["APPROVAL_DIGEST"]}
+        authorization["AUTHORIZED_AT"] = approval["DECIDED_AT"]
+        state["PUBLISH_AUTHORIZATION"] = authorization
+    else:
+        state.pop("PUBLISH_AUTHORIZATION", None)
     atomic_write(state_path, state)
     print(json.dumps(state, sort_keys=True))
 
@@ -493,12 +501,10 @@ def authorize_publish_command(args):
     state = read_json(args.state)
     if state.get("STATE") != "READY_TO_PUBLISH":
         raise ValueError("publish authorization requires READY_TO_PUBLISH")
-    if any(not state.get(field) for field in PUBLISH_AUTHORIZATION_FIELDS):
-        raise ValueError("publish authorization requires approval, project, and Audit bindings")
+    authorization = publish_authorization_bindings(state)
     evidence = Path(args.evidence).resolve()
     if not evidence.is_file():
         raise ValueError("explicit publish authorization evidence is required")
-    authorization = {field: state[field] for field in PUBLISH_AUTHORIZATION_FIELDS}
     authorization["EVIDENCE"] = {"PATH": str(evidence), "DIGEST": sha256_file(evidence)}
     authorization["AUTHORIZED_AT"] = now()
     state["PUBLISH_AUTHORIZATION"] = authorization
@@ -517,6 +523,15 @@ def dispatch_command(args):
     print(json.dumps(state, sort_keys=True))
 
 
+def publish_authorization_bindings(state):
+    if not isinstance(state.get("UNTRACKED_BASELINE"), list):
+        raise ValueError("publish authorization requires an untracked baseline list")
+    required = set(PUBLISH_AUTHORIZATION_FIELDS) - {"UNTRACKED_BASELINE"}
+    if any(not state.get(field) for field in required):
+        raise ValueError("publish authorization requires approval, project, and Audit bindings")
+    return {field: state[field] for field in PUBLISH_AUTHORIZATION_FIELDS}
+
+
 def validate_publish_authorization(state):
     authorization = state.get("PUBLISH_AUTHORIZATION")
     if not isinstance(authorization, dict):
@@ -524,6 +539,16 @@ def validate_publish_authorization(state):
     for field in PUBLISH_AUTHORIZATION_FIELDS:
         if authorization.get(field) != state.get(field):
             raise ValueError("publish authorization binding changed: %s" % field)
+
+
+def complete_gate_publish_authorization(state):
+    authorization = state.get("PUBLISH_AUTHORIZATION")
+    if not isinstance(authorization, dict):
+        raise ValueError("missing publish authorization record")
+    for field in PUBLISH_AUTHORIZATION_FIELDS:
+        if authorization.get(field) is not None and authorization[field] != state.get(field):
+            raise ValueError("publish authorization binding changed: %s" % field)
+    authorization.update(publish_authorization_bindings(state))
 
 
 def validate_recovery(state, event, evidence_path):
@@ -596,6 +621,8 @@ def transition(args):
                 state[field] = handoff[field]
         if current == "PUBLISHING" and event == "STEP_PASS":
             state["PUBLISH_STEP_RECEIPTS"] = handoff["PUBLISH_STEP_RECEIPTS"]
+    if current == "AUDITING" and event == "PASS" and state.get("PUBLISH_AUTHORIZED"):
+        complete_gate_publish_authorization(state)
     state["STATE"] = target
     if target == "EXPLORING" and current != "EXPLORING":
         state["APPROVAL_ARTIFACT"] = None

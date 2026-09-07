@@ -52,6 +52,11 @@ binds `PROPOSAL_DIGEST`, `PROGRESS_DIGEST`, `BASE_SHA`, `HEAD_SHA`, and the
 non-ignored untracked baseline. Publisher must confirm those bindings remain
 equal before publishing.
 
+Both Human Gate and later `READY_TO_PUBLISH` authorization produce the same
+`PUBLISH_AUTHORIZATION` record shape. It binds the complete
+`UNTRACKED_BASELINE` list (including an empty list); Audit completes the
+Change/digest/SHA values for gate-time authorization before direct Publishing.
+
 Producing stages can replace only their outputs: Propose/revision may update
 proposal/progress digests; Apply/fix may update progress and `HEAD_SHA`. Proposal
 Review compares against the latest proposal handoff. Audit and Publisher reject

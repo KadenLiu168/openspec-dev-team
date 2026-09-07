@@ -148,10 +148,11 @@ python3 "$TEAM_ROOT/scripts/workflow-state.py" approve --state <state> --explore
 python3 "$TEAM_ROOT/scripts/workflow-state.py" approve --state <state> --explore-result <file> --decision REJECT
 ```
 
-Then apply the matching `APPROVE`, `REVISE`, or `REJECT` transition. The
-`APPROVAL_ARTIFACT` binds `EXPLORE_DIGEST`, `PROJECT_REALPATH`, `BRANCH`,
-`REMOTE_URL`, and publish scope. Changed scope invalidates it. Without explicit
-authorization, an Audit PASS stops at `READY_TO_PUBLISH`.
+Apply the matching transition. `APPROVAL_ARTIFACT` binds `EXPLORE_DIGEST`,
+project, branch, remote, and publish scope. With `--publish-authorized`,
+`approve` also persists `PUBLISH_AUTHORIZATION` bound to `UNTRACKED_BASELINE`
+(which may be `[]`); Audit PASS completes and validates it before `PUBLISHING`.
+Otherwise Audit PASS stops at `READY_TO_PUBLISH`.
 For explicit later authorization there, preserve the original approval and run:
 
 ```text

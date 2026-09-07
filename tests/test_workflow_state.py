@@ -10,6 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "workflow-state.py"
+PUBLISH_AUTHORIZATION_FIELDS = (
+    "RUN_ID", "PROJECT_REALPATH", "BRANCH", "REMOTE_URL", "CHANGE",
+    "APPROVAL_ARTIFACT", "APPROVAL_DIGEST", "PROPOSAL_DIGEST", "PROGRESS_DIGEST",
+    "BASE_SHA", "HEAD_SHA", "UNTRACKED_BASELINE",
+)
 
 
 class WorkflowStateTransitionTests(unittest.TestCase):
@@ -33,13 +38,24 @@ class WorkflowStateTransitionTests(unittest.TestCase):
         )
 
     def test_canonical_transition_routes(self):
+        authorized = {
+            "PUBLISH_AUTHORIZED": True,
+            "PROJECT_REALPATH": "/project", "BRANCH": "main", "REMOTE_URL": "origin",
+            "CHANGE": "change", "APPROVAL_ARTIFACT": "approval.json", "APPROVAL_DIGEST": "approval",
+            "PROPOSAL_DIGEST": "proposal", "PROGRESS_DIGEST": "progress",
+            "BASE_SHA": "base", "HEAD_SHA": "head", "UNTRACKED_BASELINE": [],
+        }
+        authorized["PUBLISH_AUTHORIZATION"] = {
+            field: ({"RUN_ID": "run-1", **authorized})[field]
+            for field in PUBLISH_AUTHORIZATION_FIELDS
+        }
         cases = [
             ("NEW", "START", {}, "EXPLORING"),
             ("AWAITING_EXPLORE_APPROVAL", "REJECT", {}, "CANCELLED"),
             ("REVIEWING_PROPOSAL", "FAIL", {"ATTEMPT_COUNT": 0}, "REVISING_PROPOSAL"),
             ("REVIEWING_PROPOSAL", "FAIL", {"ATTEMPT_COUNT": 2}, "NEEDS_HUMAN"),
             ("AUDITING", "PASS", {}, "READY_TO_PUBLISH"),
-            ("AUDITING", "PASS", {"PUBLISH_AUTHORIZED": True}, "PUBLISHING"),
+            ("AUDITING", "PASS", authorized, "PUBLISHING"),
             ("BLOCKED", "RESOLVED", {"RESUME_STATE": "AUDITING"}, "AUDITING"),
         ]
         for state, event, extra, expected in cases:
@@ -284,6 +300,64 @@ class WorkflowStateInitApprovalAndReceiptTests(unittest.TestCase):
         self.assertTrue(approval["PUBLISH_AUTHORIZED"])
         self.assertIn("DECIDED_AT", approval)
         self.assertEqual(approved["EXPLORE_DIGEST"], approval["EXPLORE_DIGEST"])
+
+    def test_gate_authorization_is_completed_by_audit_before_direct_publishing(self):
+        initialized, _ = self.init()
+        state_path = Path(initialized["STATE_PATH"])
+        handoff_path = self.project / "handoff.json"
+        explore = self.project / "explore.md"
+        explore.write_text("Approved direction\n", encoding="utf-8")
+
+        def transition_handoff(owner, target, **overrides):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            payload = {
+                "RUN_ID": state["RUN_ID"], "ATTEMPT_ID": state["ATTEMPT_ID"], "STATUS": "PASS",
+                "CHANGE": state.get("CHANGE"), "REQUEST_ARTIFACT": state["REQUEST_ARTIFACT"],
+                "APPROVAL_ARTIFACT": state.get("APPROVAL_ARTIFACT"),
+                "APPROVAL_DIGEST": state.get("APPROVAL_DIGEST"), "SUMMARY": "stage complete",
+                "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
+                "PROPOSAL_DIGEST": state.get("PROPOSAL_DIGEST"),
+                "PROGRESS_DIGEST": state.get("PROGRESS_DIGEST"), "BASE_SHA": state.get("BASE_SHA"),
+                "HEAD_SHA": state.get("HEAD_SHA"), "UNTRACKED_BASELINE": state["UNTRACKED_BASELINE"],
+                "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": target, "OWNER": owner,
+            }
+            payload.update(overrides)
+            handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+            result = self.invoke("transition", "--state", str(state_path), "--event", "PASS",
+                                 "--handoff", str(handoff_path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "START").returncode, 0)
+        transition_handoff(
+            "Explore / Proposal", "AWAITING_EXPLORE_APPROVAL", CHANGE=None,
+            PROPOSAL_DIGEST=None, PROGRESS_DIGEST=None,
+            EXPLORE_ARTIFACT=str(explore), EXPLORE_DIGEST=hashlib.sha256(explore.read_bytes()).hexdigest(),
+        )
+        result = self.invoke("approve", "--state", str(state_path), "--decision", "APPROVE",
+                             "--explore-result", str(explore), "--publish-authorized")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        approved = json.loads(state_path.read_text(encoding="utf-8"))
+        initial_authorization = approved["PUBLISH_AUTHORIZATION"]
+        self.assertEqual(initial_authorization["UNTRACKED_BASELINE"], ["baseline.txt"])
+        self.assertIsNone(initial_authorization["CHANGE"])
+        self.assertEqual(initial_authorization["EVIDENCE"]["DIGEST"], approved["APPROVAL_DIGEST"])
+
+        self.assertEqual(self.invoke("transition", "--state", str(state_path), "--event", "APPROVE").returncode, 0)
+        transition_handoff(
+            "Explore / Proposal", "REVIEWING_PROPOSAL", CHANGE="change",
+            PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="tasks",
+        )
+        transition_handoff("Proposal Reviewer", "APPLYING")
+        transition_handoff("Apply Executor", "AUDITING", HEAD_SHA="implemented")
+        published = transition_handoff("Pre-Archive Auditor", "PUBLISHING")
+
+        self.assertEqual(published["STATE"], "PUBLISHING")
+        authorization = published["PUBLISH_AUTHORIZATION"]
+        for field in PUBLISH_AUTHORIZATION_FIELDS:
+            self.assertEqual(authorization[field], published[field])
+        self.assertEqual(authorization["EVIDENCE"], initial_authorization["EVIDENCE"])
+        self.assertEqual(authorization["AUTHORIZED_AT"], initial_authorization["AUTHORIZED_AT"])
 
     def test_publish_receipts_are_ordered_replayable_and_finish_at_complete(self):
         state_path = self.project / "state.json"
@@ -1019,8 +1093,7 @@ class WorkflowStateFinalRegressionTests(unittest.TestCase):
         self.assertEqual(authorized["APPROVAL_DIGEST"], initial["APPROVAL_DIGEST"])
         self.assertEqual(approval.read_text(), '{"PUBLISH_AUTHORIZED": false}')
         record = authorized["PUBLISH_AUTHORIZATION"]
-        for field in ("RUN_ID", "PROJECT_REALPATH", "BRANCH", "REMOTE_URL", "CHANGE", "APPROVAL_DIGEST",
-                      "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA"):
+        for field in PUBLISH_AUTHORIZATION_FIELDS:
             self.assertEqual(record[field], initial[field])
         self.assertEqual(record["EVIDENCE"]["DIGEST"], hashlib.sha256(evidence.read_bytes()).hexdigest())
         self.assertIn("AUTHORIZED_AT", record)
@@ -1028,6 +1101,19 @@ class WorkflowStateFinalRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["STATE"], "PUBLISHING")
         self.assertTrue(json.loads(result.stdout)["PUBLISH_AUTHORIZED"])
+
+    def test_later_publish_authorization_accepts_and_binds_empty_baseline(self):
+        evidence = self.root / "decision.md"
+        evidence.write_text("publish")
+        self.stage("READY_TO_PUBLISH", PROJECT_REALPATH=str(self.root), BRANCH="main",
+                   REMOTE_URL="https://example.test/repo.git", UNTRACKED_BASELINE=[])
+        result = self.invoke("authorize-publish", "--evidence", str(evidence))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        authorized = json.loads(result.stdout)
+        self.assertEqual(authorized["PUBLISH_AUTHORIZATION"]["UNTRACKED_BASELINE"], [])
+        result = self.invoke("transition", "--event", "AUTHORIZE_PUBLISH")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["STATE"], "PUBLISHING")
 
     def test_later_publish_authorization_requires_ready_state_evidence_and_bindings(self):
         evidence = self.root / "decision.md"
@@ -1055,14 +1141,15 @@ class WorkflowStateFinalRegressionTests(unittest.TestCase):
     def test_later_authorization_rejects_changed_scope_before_publishing(self):
         evidence = self.root / "decision.md"
         evidence.write_text("publish this audited Change")
-        for field in ("HEAD_SHA", "PROGRESS_DIGEST", "PROPOSAL_DIGEST", "APPROVAL_DIGEST", "BRANCH", "REMOTE_URL"):
+        for field in ("HEAD_SHA", "PROGRESS_DIGEST", "PROPOSAL_DIGEST", "APPROVAL_DIGEST", "BRANCH",
+                      "REMOTE_URL", "UNTRACKED_BASELINE"):
             with self.subTest(field=field):
                 self.stage("READY_TO_PUBLISH", PROJECT_REALPATH=str(self.root), BRANCH="main",
                            REMOTE_URL="https://example.test/repo.git")
                 result = self.invoke("authorize-publish", "--evidence", str(evidence))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 changed = json.loads(result.stdout)
-                changed[field] = "different"
+                changed[field] = ["different.db"] if field == "UNTRACKED_BASELINE" else "different"
                 self.state_path.write_text(json.dumps(changed))
                 before = self.state_path.read_bytes()
                 result = self.invoke("transition", "--event", "AUTHORIZE_PUBLISH")
