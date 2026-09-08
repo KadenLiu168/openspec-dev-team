@@ -1,0 +1,36 @@
+# Local agent integrations and runtime state
+.agents/skills/
+.agents/state/
+.agents/runs/
+.agents/*.lock
+.claude/
+.pi/
+.superpowers/
+
+# Python caches and generated artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# OS and temporary files
+.DS_Store
+*.log
+*.tmp
+*.swp
