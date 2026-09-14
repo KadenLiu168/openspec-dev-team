@@ -8,13 +8,7 @@
 - OpenSpec 驱动的需求、设计、实施和验证生命周期；
 - 在目标项目 `main` 分支上串行运行的五个 specialist profiles。
 
-五个 authored Codex profiles 位于 `profiles/codex/agents/`：
-
-- `openspec-explore-proposal.toml`
-- `openspec-proposal-reviewer.toml`
-- `openspec-apply-executor.toml`
-- `openspec-pre-archive-auditor.toml`
-- `openspec-archivist-publisher.toml`
+Authored Codex specialist profiles are maintained under `profiles/codex/agents/`, which is the canonical source.
 
 `profiles/pi/README.md` 和 `profiles/claude-code/README.md` 仅是
 **template-only platform mappings**，不表示本仓库支持 Pi、Claude Code adapter、
@@ -65,6 +59,7 @@ runtime 引入未获批准的 adapter、registry、generated file 或 dependency
 
 ## Verification Expectations
 
-完成修改后，确认所有新引用的 authored paths 仍存在，运行适用的 `tests/`、
-`scripts/doctor.sh` 和 OpenSpec strict validation，并检查最终 diff 只包含批准范围内的
-文件。文档对齐不得通过修改测试或运行时行为来“修复”验证结果。
+完成修改后，确认所有新引用的 authored paths 仍存在，运行适用的 `tests/`，
+run applicable diagnostics using their documented invocation，并执行 OpenSpec strict
+validation；检查最终 diff 只包含批准范围内的文件。文档对齐不得通过修改测试或运行时
+行为来“修复”验证结果。

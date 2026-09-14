@@ -16,6 +16,7 @@ HANDOFF_CONTRACT = ROOT / "agents/shared/handoff-contract.md"
 STATE_MACHINE = ROOT / "skills/openspec-dev-team/references/state-machine.md"
 SKILL = ROOT / "skills/openspec-dev-team/SKILL.md"
 README = ROOT / "README.md"
+AGENTS = ROOT / "AGENTS.md"
 CONTRACT_FILES = (WORKFLOW_POLICY, HANDOFF_CONTRACT, STATE_MACHINE, SKILL, README)
 
 EXPECTED_AGENTS = {
@@ -75,6 +76,17 @@ class ContractTests(unittest.TestCase):
     def test_all_contract_files_exist(self):
         missing = [str(path.relative_to(ROOT)) for path in CONTRACT_FILES if not path.is_file()]
         self.assertEqual([], missing)
+
+    def test_root_agents_preserves_profile_source_and_diagnostic_invariants(self):
+        content = AGENTS.read_text()
+        self.assertIn("profiles/codex/agents/", content)
+        self.assertIn("run applicable diagnostics using their documented invocation", content)
+        for name in EXPECTED_AGENTS:
+            with self.subTest(agent=name):
+                self.assertNotIn(name, content)
+        verification = content.split("## Verification Expectations", 1)[1]
+        self.assertNotIn("scripts/doctor.sh", verification)
+        self.assertEqual(content.count("scripts/doctor.sh"), 1)
 
     def test_codex_profiles_are_the_exact_default_agent_set(self):
         self.assertEqual(
