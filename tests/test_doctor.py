@@ -40,9 +40,7 @@ class DoctorTest(unittest.TestCase):
         agent_dir = self.home / ".codex/agents"
         agent_dir.mkdir()
         for name in AGENTS:
-            (agent_dir / (name + ".toml")).symlink_to(
-                self.repository / "profiles/codex/agents" / (name + ".toml")
-            )
+            self.copy_profile(name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "calls.jsonl"
@@ -97,8 +95,7 @@ else:
         self.git("init", "--quiet", "--initial-branch=main")
         self.agents = self.project / ".agents"
         self.agents.mkdir()
-        for name in ("shared", "team"):
-            (self.agents / name).symlink_to(self.repository / "agents" / name)
+        (self.agents / "shared").symlink_to(self.repository / "agents/shared")
         (self.agents / "state").mkdir()
         (self.agents / "runs").mkdir()
         (self.agents / ".gitignore").write_text("/state/\n/runs/\n/*.lock\n")
@@ -110,7 +107,7 @@ else:
         ).replace("/absolute/path/to/fixture-project", str(self.project))
         self.write_config(self.config)
         self.git("add", ".agents/.gitignore", ".agents/project.md", ".agents/shared",
-                 ".agents/team", "openspec/config.yaml", "tracked.txt")
+                 "openspec/config.yaml", "tracked.txt")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "commit", "--quiet", "-m", "fixture")
 
@@ -130,6 +127,11 @@ else:
 
     def write_config(self, content):
         (self.agents / "project.md").write_text(content)
+
+    def copy_profile(self, name):
+        (self.home / ".codex/agents" / (name + ".toml")).write_bytes(
+            (self.repository / "profiles/codex/agents" / (name + ".toml")).read_bytes()
+        )
 
     def run_doctor(self, *arguments, success=True):
         self.assertTrue(SCRIPT.is_file(), "missing scripts/doctor.sh")
@@ -161,20 +163,16 @@ else:
         self.assertIn("PASS skill", output)
         self.assertIn("PASS python3", output)
 
-    def test_global_accepts_actual_repository_source_modes(self):
-        skill_link = self.home / ".codex/skills/openspec-dev-team"
-        skill_link.unlink()
-        skill_link.symlink_to(REPOSITORY / "skills/openspec-dev-team")
+    def test_global_rejects_matching_agent_symlinks(self):
         for name in AGENTS:
             link = self.home / ".codex/agents" / (name + ".toml")
             link.unlink()
-            link.symlink_to(REPOSITORY / "profiles/codex/agents" / (name + ".toml"))
-        result = subprocess.run(
-            ["/bin/bash", str(SCRIPT), "--global"], cwd=self.root, env=self.env,
-            capture_output=True, text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS executable scripts/workflow-state.py", result.stdout)
+            link.symlink_to(self.repository / "profiles/codex/agents" / (name + ".toml"))
+            with self.subTest(agent=name):
+                output = self.run_doctor("--global", success=False)
+                self.assertIn("regular file", output)
+            link.unlink()
+            self.copy_profile(name)
 
     def test_global_missing_skill_link(self):
         (self.home / ".codex/skills/openspec-dev-team").unlink()
@@ -192,21 +190,22 @@ else:
     def test_global_missing_agent_link(self):
         for name in AGENTS:
             link = self.home / ".codex/agents" / (name + ".toml")
-            target = link.readlink()
             link.unlink()
             with self.subTest(agent=name):
                 self.assertIn("FAIL agent " + name, self.run_doctor("--global", success=False))
-            link.symlink_to(target)
+            self.copy_profile(name)
 
     def test_global_wrong_agent_target(self):
         link = self.home / ".codex/agents" / (AGENTS[0] + ".toml")
         link.unlink()
         link.symlink_to(self.repository / "profiles/codex/agents" / (AGENTS[1] + ".toml"))
         self.run_doctor("--global", success=False)
+        link.unlink()
+        self.copy_profile(AGENTS[0])
 
-    def test_global_rejects_model_and_reasoning_drift_for_every_agent(self):
+    def test_global_rejects_installed_model_and_reasoning_drift_for_every_agent(self):
         for name in AGENTS:
-            path = self.repository / "profiles/codex/agents" / (name + ".toml")
+            path = self.home / ".codex/agents" / (name + ".toml")
             original = path.read_text()
             for key in ("model", "model_reasoning_effort"):
                 with self.subTest(agent=name, key=key):
@@ -218,7 +217,7 @@ else:
             path.write_text(original)
 
     def test_global_rejects_missing_required_toml_keys_and_malformed_toml(self):
-        path = self.repository / "profiles/codex/agents" / (AGENTS[0] + ".toml")
+        path = self.home / ".codex/agents" / (AGENTS[0] + ".toml")
         original = path.read_text()
         for key in ("name", "description", "model", "model_reasoning_effort", "sandbox_mode"):
             with self.subTest(key=key):
@@ -228,6 +227,15 @@ else:
         for content in (original.split("developer_instructions")[0], "invalid = ["):
             path.write_text(content)
             self.run_doctor("--global", success=False)
+        path.write_text(original)
+
+    def test_global_rejects_source_drift_in_installed_profile(self):
+        path = self.home / ".codex/agents" / (AGENTS[0] + ".toml")
+        original = path.read_bytes()
+        path.write_bytes(original + b"\n# edited after installation\n")
+        output = self.run_doctor("--global", success=False)
+        self.assertIn("source drift", output)
+        path.write_bytes(original)
 
     def test_global_requires_concrete_skill_source(self):
         (self.repository / "skills/openspec-dev-team/SKILL.md").unlink()
@@ -311,16 +319,15 @@ else:
         self.assertIn("FAIL OpenSpec root", self.run_doctor("--project", self.project, success=False))
 
     def test_project_requires_correct_links(self):
-        for name in ("shared", "team"):
-            link = self.agents / name
-            target = link.readlink()
-            link.unlink()
-            with self.subTest(link=name):
-                self.run_doctor("--project", self.project, success=False)
-            link.symlink_to(self.repository / "templates")
+        link = self.agents / "shared"
+        target = link.readlink()
+        link.unlink()
+        with self.subTest(link="shared"):
             self.run_doctor("--project", self.project, success=False)
-            link.unlink()
-            link.symlink_to(target)
+        link.symlink_to(self.repository / "templates")
+        self.run_doctor("--project", self.project, success=False)
+        link.unlink()
+        link.symlink_to(target)
 
     def test_project_validates_config_fields_without_echoing_values(self):
         for field in ("project_name", "project_realpath", "main_branch", "expected_remote",

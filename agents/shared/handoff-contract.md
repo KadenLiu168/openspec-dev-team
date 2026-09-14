@@ -87,8 +87,11 @@ owner, and saves `RESUME_STATE` for evidence-based recovery. Both events use
 `validate-handoff` followed by `transition --handoff`, like other handoffs.
 
 A Publishing blocker must report exactly the persisted receipts and the first
-incomplete step. A blocked `ARCHIVE` with only a `PREFLIGHT` receipt has no
-required archive digest. After an `ARCHIVE` receipt exists, its digest must match.
+incomplete step. An unauthorized `PREFLIGHT` must use
+`STATUS=BLOCKED`, `PUBLISH_STEP=PREFLIGHT`, `NEXT_STATE=BLOCKED`,
+`PUBLISH_STEP_RECEIPTS=[]`, and `ARCHIVE_DIGEST=null`. A blocked `ARCHIVE` with
+only a `PREFLIGHT` receipt has no required archive digest. After an `ARCHIVE`
+receipt exists, its digest must match.
 
 Test evidence is a list of command, exit code, timestamp, and log path. Do not
 embed complete logs in `EVIDENCE`.

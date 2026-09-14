@@ -283,6 +283,10 @@ def validate_handoff(state, payload, event):
                 validate_receipt_sequence(receipts)
                 if len(receipts) >= len(PUBLISH_STEPS) or step != PUBLISH_STEPS[len(receipts)]:
                     raise ValueError("inconsistent PUBLISH_STEP")
+                if (event == "BLOCKED" and step == "PREFLIGHT" and not receipts
+                        and ("ARCHIVE_DIGEST" not in payload
+                             or payload.get("ARCHIVE_DIGEST") is not None)):
+                    raise ValueError("blocked PREFLIGHT requires ARCHIVE_DIGEST=null")
                 archive_index = PUBLISH_STEPS.index("ARCHIVE")
                 if len(receipts) > archive_index:
                     archive_digest = payload.get("ARCHIVE_DIGEST")

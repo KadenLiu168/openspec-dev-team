@@ -41,13 +41,10 @@ class LinkProjectTest(unittest.TestCase):
         )
 
     def assert_links_are_correct(self):
-        for name in ("shared", "team"):
-            link = self.project / ".agents" / name
-            self.assertTrue(link.is_symlink(), f"{link} is not a symlink")
-            self.assertEqual(
-                link.resolve(),
-                (REPOSITORY / "agents" / name).resolve(),
-            )
+        link = self.project / ".agents" / "shared"
+        self.assertTrue(link.is_symlink(), f"{link} is not a symlink")
+        self.assertEqual(link.resolve(), (REPOSITORY / "agents/shared").resolve())
+        self.assertFalse((self.project / ".agents" / "team").exists())
 
     def test_dry_run_reports_success_without_writing(self):
         marker = self.project / "keep.txt"
@@ -69,7 +66,7 @@ class LinkProjectTest(unittest.TestCase):
         agents = self.project / ".agents"
         self.assertEqual(
             sorted(path.name for path in agents.iterdir()),
-            [".gitignore", "project.md", "runs", "shared", "state", "team"],
+            [".gitignore", "project.md", "runs", "shared", "state"],
         )
         self.assert_links_are_correct()
         self.assertTrue((agents / "state").is_dir())
@@ -87,7 +84,6 @@ class LinkProjectTest(unittest.TestCase):
             "project": (agents / "project.md").read_text(),
             "gitignore": (agents / ".gitignore").read_text(),
             "shared": os.readlink(agents / "shared"),
-            "team": os.readlink(agents / "team"),
         }
 
         second = self.run_script(self.project)
@@ -99,7 +95,6 @@ class LinkProjectTest(unittest.TestCase):
                 "project": (agents / "project.md").read_text(),
                 "gitignore": (agents / ".gitignore").read_text(),
                 "shared": os.readlink(agents / "shared"),
-                "team": os.readlink(agents / "team"),
             },
             before,
         )

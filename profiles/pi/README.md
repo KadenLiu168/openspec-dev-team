@@ -10,8 +10,8 @@ before use; this repository has not verified the complete workflow on Pi.
 - Put adapter-owned agent definitions in the custom-agent or extension
   discovery location selected by the local Pi installation; record that path
   as `AGENT_DEFINITIONS_DIR` rather than copying role contracts per project.
-- Keep `agents/shared/`, `agents/team/`, and `.agents/project.md` at the paths
-  referenced by each definition.
+- Keep `agents/shared/` and `.agents/project.md` at the paths referenced by
+  each definition; deleted team-role files are not required.
 
 ## Fresh context and fields
 

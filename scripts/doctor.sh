@@ -82,11 +82,15 @@ def global_checks():
     }
     for name, expected in agents.items():
         source = REPOSITORY / "profiles/codex/agents" / (name + ".toml")
-        if not check(correct_link(home / ".codex/agents" / source.name, source),
-                     "agent " + name + " source and installed link"):
+        installed = home / ".codex/agents" / source.name
+        if not check(installed.is_file() and not installed.is_symlink()
+                     and os.access(installed, os.R_OK),
+                     "agent " + name + " regular file required for native discovery"):
             continue
+        installed_bytes = None
         try:
-            profile = tomllib.loads(source.read_text())
+            installed_bytes = installed.read_bytes()
+            profile = tomllib.loads(installed_bytes.decode("utf-8"))
             valid = all(isinstance(profile.get(key), str) and profile[key].strip() for key in (
                 "name", "description", "model", "model_reasoning_effort",
                 "sandbox_mode", "developer_instructions",
@@ -94,9 +98,14 @@ def global_checks():
             valid = valid and profile["name"] == name and tuple(profile[key] for key in (
                 "model", "model_reasoning_effort", "sandbox_mode",
             )) == expected
-        except (OSError, ValueError):
+        except (OSError, UnicodeDecodeError, ValueError):
             valid = False
-        check(valid, "agent " + name + " required TOML fields and exact model/reasoning")
+        check(valid, "agent " + name + " exact name and required TOML metadata")
+        try:
+            matches_source = installed_bytes == source.read_bytes()
+        except OSError:
+            matches_source = False
+        check(matches_source, "agent " + name + " matches repository source; reinstall on source drift")
     for name in ("doctor.sh", "link-project.sh", "workflow-state.py"):
         path = REPOSITORY / "scripts" / name
         check(path.is_file() and os.access(path, os.X_OK), "executable scripts/" + name)
@@ -221,8 +230,7 @@ def project_checks(argument):
         check(valid, "OpenSpec list --json")
         check(run(["openspec", "doctor"], location).returncode == 0, "OpenSpec doctor")
     agents = git_root / ".agents"
-    for name in ("shared", "team"):
-        check(correct_link(agents / name, REPOSITORY / "agents" / name), ".agents/" + name + " link")
+    check(correct_link(agents / "shared", REPOSITORY / "agents/shared"), ".agents/shared link")
     try:
         valid = not (agents / "project.md").is_symlink() and project_config(
             agents / "project.md", git_root, openspec_root.resolve(),

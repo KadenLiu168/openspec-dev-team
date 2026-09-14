@@ -82,3 +82,31 @@ FINAL_COMMIT -> PUSH -> LINEAR_SYNC -> COMPLETE`. Persist a receipt immediately
 after every external or non-repeatable action. On recovery, verify actual state
 and continue only the first incomplete step. If archive-to-final changes include
 business code, Audit PASS is invalid and the workflow returns to `AUDITING`.
+
+Treat `PUBLISHING` as receipt-based recovery, never as replay. Reconcile the
+actual Git/OpenSpec/Linear state before recording or continuing each receipt,
+using the Audit binding and `PUBLISH_STEP_RECEIPTS`.
+
+Only `openspec-archivist-publisher` performs a step. It returns a current-attempt
+handoff whose final receipt is the authoritative receipt payload: step, result
+path and digest, time, input digests, and applicable `ARCHIVE_DIGEST` or
+`FINAL_SHA`. The Orchestrator uses that same candidate in this exact order:
+
+```text
+python3 "$TEAM_ROOT/scripts/workflow-state.py" validate-handoff --state <state> --handoff <candidate> --event STEP_PASS
+python3 "$TEAM_ROOT/scripts/workflow-state.py" publish-receipt --state <state> --handoff <candidate> --step <step> --result-file <file> [--archive-digest <digest>] [--final-sha <sha>]
+python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --handoff <candidate> --event STEP_PASS
+```
+
+`publish-receipt` verifies and persists the candidate's exact final receipt but
+never changes lifecycle state. Only `transition` advances the event;
+`COMPLETE` becomes `DONE` there. Exact replays are idempotent, while a skipped
+or altered receipt is rejected without mutation.
+
+For unauthorized preflight, accept only a handoff with
+`STATUS=BLOCKED`, `PUBLISH_STEP=PREFLIGHT`, `NEXT_STATE=BLOCKED`,
+`PUBLISH_STEP_RECEIPTS=[]`, and `ARCHIVE_DIGEST=null`; no archive digest exists
+yet. Do not record a receipt or send `STEP_PASS`. Other invalid authorization or
+bindings are also `BLOCKED`. A blocked `ARCHIVE` needs no digest before its
+receipt exists; after the archive receipt, require its matching digest and the
+first incomplete step.

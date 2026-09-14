@@ -10,8 +10,8 @@ Claude Code.
   scope, or `.claude/skills/openspec-dev-team/SKILL.md` for project scope.
 - Install subagent definitions under `~/.claude/agents/` for user scope, or
   `.claude/agents/` for project scope.
-- Definitions reference the shared role contracts and `.agents/project.md`;
-  they do not copy those files into each project.
+- Definitions reference the shared workflow/handoff contracts and
+  `.agents/project.md`; deleted team-role files are not required.
 
 ## Fresh context and fields
 

@@ -1,8 +1,10 @@
 """Static contract checks for the OpenSpec development team."""
 
 from pathlib import Path
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -11,18 +13,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_POLICY = ROOT / "agents/shared/workflow-policy.md"
 HANDOFF_CONTRACT = ROOT / "agents/shared/handoff-contract.md"
-ROLE_FILES = (
-    ROOT / "agents/team/orchestrator.md",
-    ROOT / "agents/team/explore-proposal.md",
-    ROOT / "agents/team/proposal-reviewer.md",
-    ROOT / "agents/team/apply-executor.md",
-    ROOT / "agents/team/pre-archive-auditor.md",
-    ROOT / "agents/team/archivist-publisher.md",
-)
 STATE_MACHINE = ROOT / "skills/openspec-dev-team/references/state-machine.md"
 SKILL = ROOT / "skills/openspec-dev-team/SKILL.md"
 README = ROOT / "README.md"
-CONTRACT_FILES = (WORKFLOW_POLICY, HANDOFF_CONTRACT, *ROLE_FILES, STATE_MACHINE, SKILL, README)
+CONTRACT_FILES = (WORKFLOW_POLICY, HANDOFF_CONTRACT, STATE_MACHINE, SKILL, README)
 
 EXPECTED_AGENTS = {
     "openspec-explore-proposal": ("gpt-5.6-sol", "medium", "workspace-write"),
@@ -30,14 +24,6 @@ EXPECTED_AGENTS = {
     "openspec-apply-executor": ("gpt-5.6-terra", "high", "workspace-write"),
     "openspec-pre-archive-auditor": ("gpt-5.6-terra", "high", "workspace-write"),
     "openspec-archivist-publisher": ("gpt-5.6-luna", "medium", "workspace-write"),
-}
-
-AGENT_ROLE_CONTRACTS = {
-    "openspec-explore-proposal": "agents/team/explore-proposal.md",
-    "openspec-proposal-reviewer": "agents/team/proposal-reviewer.md",
-    "openspec-apply-executor": "agents/team/apply-executor.md",
-    "openspec-pre-archive-auditor": "agents/team/pre-archive-auditor.md",
-    "openspec-archivist-publisher": "agents/team/archivist-publisher.md",
 }
 
 CODEX_AGENTS = ROOT / "profiles/codex/agents"
@@ -90,12 +76,21 @@ class ContractTests(unittest.TestCase):
         missing = [str(path.relative_to(ROOT)) for path in CONTRACT_FILES if not path.is_file()]
         self.assertEqual([], missing)
 
-    def test_roles_declare_required_contract_sections(self):
-        for role_file in ROLE_FILES:
-            with self.subTest(role=role_file.name):
-                content = role_file.read_text()
-                for section in ("READ", "WRITE", "FORBIDDEN", "INPUT", "OUTPUT"):
+    def test_codex_profiles_are_the_exact_default_agent_set(self):
+        self.assertEqual(
+            sorted(path.name for path in CODEX_AGENTS.glob("*.toml")),
+            sorted(name + ".toml" for name in EXPECTED_AGENTS),
+        )
+        self.assertFalse((ROOT / "agents/team").exists())
+
+    def test_profiles_embed_required_role_contract_sections(self):
+        for name in EXPECTED_AGENTS:
+            with self.subTest(agent=name):
+                content = (CODEX_AGENTS / f"{name}.toml").read_text()
+                for section in ("## INPUT", "## READ", "## WRITE", "## FORBIDDEN",
+                                "## OUTPUT", "## Escalation"):
                     self.assertIn(section, content)
+                self.assertNotIn("agents/team/", content)
 
     def test_state_machine_contains_every_design_transition(self):
         content = STATE_MACHINE.read_text()
@@ -129,7 +124,7 @@ class ContractTests(unittest.TestCase):
                 self.assertTrue(profile["description"])
                 instructions = profile["developer_instructions"]
                 self.assertTrue(instructions)
-                self.assertIn(AGENT_ROLE_CONTRACTS[name], instructions)
+                self.assertNotIn("agents/team/", instructions)
                 self.assertEqual(
                     expected,
                     (
@@ -145,6 +140,8 @@ class ContractTests(unittest.TestCase):
                 content = mapping_path.read_text()
                 self.assertIn("template-only", content)
                 self.assertNotIn("end-to-end validation", content.lower())
+                self.assertNotIn("agents/team/", content)
+                self.assertNotIn("orchestrator.md", content)
 
     def test_profile_contract_paths_are_readable_from_bootstrapped_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -152,27 +149,23 @@ class ContractTests(unittest.TestCase):
             subprocess.run(["git", "init", str(project)], check=True, capture_output=True)
             subprocess.run([str(ROOT / "scripts/link-project.sh"), str(project)],
                            check=True, capture_output=True)
-            for name, role_path in AGENT_ROLE_CONTRACTS.items():
+            for name in EXPECTED_AGENTS:
                 with self.subTest(agent=name):
                     profile = tomllib.loads((CODEX_AGENTS / f"{name}.toml").read_text())
                     opening = profile["developer_instructions"].split("Outside those fixed contracts", 1)[0]
                     paths = re.findall(r"(?<![\w/])\.?agents/[\w/.-]+\.md", opening)
-                    self.assertEqual(len(paths), 4)
+                    self.assertEqual(len(paths), 3)
                     resolved = [(project / path).resolve() for path in paths]
-                    self.assertEqual(resolved[:3], [
+                    self.assertEqual(resolved[:2], [
                         ROOT / "agents/shared/workflow-policy.md",
                         ROOT / "agents/shared/handoff-contract.md",
-                        ROOT / role_path,
                     ])
                     for path in resolved:
                         self.assertTrue(path.read_text().strip())
 
     def test_apply_owns_commit_of_current_reviewed_change_artifacts(self):
         profile = tomllib.loads((CODEX_AGENTS / "openspec-apply-executor.toml").read_text())
-        for content in (
-            WORKFLOW_POLICY.read_text(), (ROOT / "agents/team/apply-executor.md").read_text(),
-            profile["developer_instructions"],
-        ):
+        for content in (WORKFLOW_POLICY.read_text(), profile["developer_instructions"]):
             with self.subTest(contract=content.splitlines()[0]):
                 self.assertIn("approved Change artifacts (proposal, design, delta specs, and tasks)",
                               " ".join(content.split()))
@@ -187,6 +180,12 @@ class OrchestrationDocumentationTests(unittest.TestCase):
     def read_document(self, path):
         self.assertTrue(path.is_file(), f"missing {path.relative_to(ROOT)}")
         return path.read_text()
+
+    def read_bash_block(self, content, heading):
+        section = content.split(heading, 1)[1]
+        block = re.search(r"```bash\n(.*?)```", section, re.S)
+        self.assertIsNotNone(block)
+        return block[1]
 
     def test_skill_is_discoverable_for_openspec_team_requests_and_concise(self):
         content = self.read_document(SKILL)
@@ -209,13 +208,15 @@ class OrchestrationDocumentationTests(unittest.TestCase):
                 self.assertIn(f"| {owner} | `{agent}` |", content)
         for required in (
             "references/state-machine.md", "agents/shared/workflow-policy.md",
-            "agents/shared/handoff-contract.md", "agents/team/orchestrator.md",
-            "sole lifecycle", "expected owner", "fresh context", "full conversation",
-            "The Orchestrator must not implement, review, or publish",
+            "agents/shared/handoff-contract.md", "sole lifecycle", "expected owner",
+            "fresh context", "full conversation", "The Orchestrator must not implement, review, or publish",
+            "owns request provenance", "handoff persistence", "Escalate Human Gates",
+            "third blocking findings", "instead of guessing", "operation-specific", "canonical reference",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
         self.assertNotIn("openspec/changes/", content)
+        self.assertNotIn("agents/team/", content)
 
     def test_skill_resolves_each_interface_from_its_canonical_root(self):
         content = self.read_document(SKILL)
@@ -224,8 +225,10 @@ class OrchestrationDocumentationTests(unittest.TestCase):
             "$SKILL_DIR/references/state-machine.md",
             "$TEAM_ROOT/agents/shared/workflow-policy.md",
             "$TEAM_ROOT/agents/shared/handoff-contract.md",
-            "$TEAM_ROOT/agents/team/orchestrator.md",
             "$PROJECT_ROOT/.agents/project.md",
+            "for routing and transition decisions",
+            "for workflow-boundary checks",
+            "for handoff validation",
             "$TEAM_ROOT/scripts/doctor.sh",
             "$TEAM_ROOT/scripts/workflow-state.py",
         ):
@@ -294,7 +297,7 @@ class OrchestrationDocumentationTests(unittest.TestCase):
                 self.assertIn(required, content)
 
     def test_skill_recovers_publishing_from_reconciled_receipts(self):
-        content = self.read_document(SKILL)
+        content = self.read_document(STATE_MACHINE).split("## Publishing steps", 1)[1]
         for required in (
             "PUBLISHING", "receipt-based recovery", "actual Git/OpenSpec/Linear state",
             "before recording or continuing each receipt", "first incomplete step",
@@ -304,6 +307,20 @@ class OrchestrationDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
+
+    def test_skill_defers_publishing_operations_to_the_phase_reference(self):
+        content = self.read_document(SKILL)
+        self.assertIn("references/state-machine.md#publishing-steps", content)
+        self.assertIn("earlier phases do not load that section", content)
+        commands = re.findall(r"^```[^\n]*\n(.*?)^```", content, re.M | re.S)
+        self.assertFalse(any("publish-receipt --state" in block for block in commands))
+        publishing = self.read_document(STATE_MACHINE).split("## Publishing steps", 1)[1]
+        commands = re.findall(r"^```[^\n]*\n(.*?)^```", publishing, re.M | re.S)
+        sequence = next(block for block in commands if "publish-receipt --state" in block)
+        self.assertLess(sequence.index("validate-handoff --state"),
+                        sequence.index("publish-receipt --state"))
+        self.assertLess(sequence.index("publish-receipt --state"),
+                        sequence.index("transition --state"))
 
     def test_smoke_is_sequential_no_write_and_checks_stale_unauthorized_handoffs(self):
         content = self.read_document(SKILL)
@@ -315,30 +332,43 @@ class OrchestrationDocumentationTests(unittest.TestCase):
             "$openspec-dev-team smoke", "no-write", "sequentially", "fixture artifacts",
             "fresh context", "current-attempt", "validate-handoff", "ATTEMPT_ID",
             "stale ATTEMPT_ID", "nonzero", "unchanged", "unauthorized preflight",
+            "CODEX_HOME", "--ephemeral", "read-only", "fixture/project", "attempted write",
             "BLOCKED", "do not run", "init", "approve", "transition", "publish-receipt",
             "archive", "commit", "push", "Linear",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, smoke)
 
+    def test_unauthorized_publisher_preflight_contract_is_explicit(self):
+        for path in (HANDOFF_CONTRACT, STATE_MACHINE, SKILL,
+                     CODEX_AGENTS / "openspec-archivist-publisher.toml"):
+            with self.subTest(path=path):
+                content = path.read_text()
+                for required in (
+                    "STATUS=BLOCKED", "PUBLISH_STEP=PREFLIGHT",
+                    "NEXT_STATE=BLOCKED", "PUBLISH_STEP_RECEIPTS=[]", "ARCHIVE_DIGEST=null",
+                ):
+                    self.assertIn(required, content)
+
     def test_readme_explains_purpose_prerequisites_installation_and_discovery(self):
         content = self.read_document(README)
         for required in (
             "OpenSpec", "Codex", "Python 3.11+", "Python 3.13", "Git", "main",
-            "ln -s", ".codex/skills", ".codex/agents", "skills/openspec-dev-team",
-            "profiles/codex/agents", "new Codex session", "custom-agent discovery",
-            "template-only",
+            "ln -s", "cp", ".codex/skills", ".codex/agents",
+            "skills/openspec-dev-team", "profiles/codex/agents", "new Codex session",
+            "custom-agent discovery", "template-only", "regular files",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
         self.assertIn("`python3` resolved from `PATH` must be Python 3.11+", content)
 
-    def test_readme_installation_preflights_every_link_target(self):
+    def test_readme_installation_preflights_every_destination_and_copies_profiles(self):
         content = self.read_document(README)
-        installation = content.split("## Installation", 1)[1].split("## Project bootstrap", 1)[0]
+        installation = self.read_bash_block(content, "## Installation")
         for required in (
-            "install_link", '[ -e "$link" ] || [ -L "$link" ]',
-            'ln -s -- "$source" "$link"', "return 1", ".codex/skills/openspec-dev-team",
+            "install_link", "install_copy", '[ -e "$path" ] || [ -L "$path" ]',
+            'ln -s -- "$source" "$link"', 'cp -- "$source" "$destination"',
+            "return 1", ".codex/skills/openspec-dev-team",
             "openspec-explore-proposal.toml", "openspec-proposal-reviewer.toml",
             "openspec-apply-executor.toml", "openspec-pre-archive-auditor.toml",
             "openspec-archivist-publisher.toml",
@@ -355,15 +385,62 @@ class OrchestrationDocumentationTests(unittest.TestCase):
             with self.subTest(preflight_destination=destination):
                 self.assertIn(destination, preflight)
 
+    def run_readme_installation(self, home):
+        installation = self.read_bash_block(self.read_document(README), "## Installation")
+        bin_dir = home.parent / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "python3").symlink_to(sys.executable)
+        environment = {**os.environ, "HOME": str(home),
+                       "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+        return subprocess.run(
+            ["/bin/bash", "-c", installation], cwd=ROOT, env=environment,
+            capture_output=True, text=True,
+        )
+
+    def test_readme_installation_creates_regular_profile_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            result = self.run_readme_installation(home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            skill = home / ".codex/skills/openspec-dev-team"
+            self.assertTrue(skill.is_symlink())
+            self.assertEqual(skill.resolve(), (ROOT / "skills/openspec-dev-team").resolve())
+            for name in EXPECTED_AGENTS:
+                installed = home / ".codex/agents" / (name + ".toml")
+                with self.subTest(agent=name):
+                    self.assertTrue(installed.is_file())
+                    self.assertFalse(installed.is_symlink())
+                    self.assertEqual(installed.read_bytes(),
+                                     (CODEX_AGENTS / installed.name).read_bytes())
+
+    def test_readme_installation_refuses_existing_destination_without_partial_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            conflict = home / ".codex/agents/openspec-apply-executor.toml"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text("user-owned\n")
+
+            result = self.run_readme_installation(home)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Refusing existing installation path", result.stderr)
+            self.assertEqual(conflict.read_text(), "user-owned\n")
+            self.assertFalse((home / ".codex/skills/openspec-dev-team").exists())
+            self.assertFalse((home / ".codex/agents/openspec-explore-proposal.toml").exists())
+
     def test_readme_documents_bootstrap_use_human_gate_and_diagnostics(self):
         content = self.read_document(README)
         for required in (
             "link-project.sh", "--dry-run", ".agents/project.md", "quality_gates",
             "project_realpath", "main_branch", "expected_remote", "openspec_root",
+            "Configuration model", "native TOML", "role-specific Markdown files are not used",
+            "only `.agents/shared`", "obsolete and is not", "shared-only project wiring",
             "$openspec-dev-team <request> [--publish]", "Human Gate",
             "AWAITING_EXPLORE_APPROVAL", "READY_TO_PUBLISH", "run-id",
             "doctor.sh", "--global", "--project", "$openspec-dev-team smoke",
-            "PUBLISHING", "receipt", "BLOCKED", "REQUEST_ARTIFACT",
+            "PUBLISHING", "receipt", "BLOCKED", "REQUEST_ARTIFACT", "CODEX_HOME",
+            "--ephemeral", "disposable fixture",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)
@@ -374,11 +451,95 @@ class OrchestrationDocumentationTests(unittest.TestCase):
             with self.subTest(agent=name):
                 self.assertIn(f"| `{name}` | `{model}` | `{effort}` | `{sandbox}` |", content)
 
-    def test_readme_removal_is_limited_to_verified_symlinks(self):
+    def test_readme_documents_refresh_and_safe_profile_migration(self):
+        content = self.read_document(README)
+        for required in (
+            "rerun", "refresh", "regular profile copies", "source drift", "manual review",
+            "repository-owned profile symlink", "cmp", "content-based ownership", "unowned or drifted",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, content)
+
+    def read_removal_script(self):
+        content = self.read_document(README)
+        return content.split("## Removal", 1)[1].split("## ", 1)[0].split(
+            "```bash", 1
+        )[1].split("```", 1)[0]
+
+    def run_readme_removal(self, home, project):
+        script = self.read_removal_script()
+        script = script.replace("repository=/absolute/path/to/openspec-dev-team",
+                                "repository=" + str(ROOT))
+        script = script.replace("project=/absolute/path/to/project", "project=" + str(project))
+        return subprocess.run(
+            ["/bin/bash", "-eu", "-c", script],
+            env={**os.environ, "HOME": str(home)}, capture_output=True, text=True,
+        )
+
+    def test_readme_removal_deletes_matching_copies_and_preserves_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            agents = home / ".codex/agents"
+            agents.mkdir(parents=True)
+            for name in EXPECTED_AGENTS:
+                (agents / (name + ".toml")).write_bytes(
+                    (CODEX_AGENTS / (name + ".toml")).read_bytes()
+                )
+            unrelated = agents / "user-owned.toml"
+            unrelated.write_text("keep\n")
+
+            result = self.run_readme_removal(home, root / "project")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in EXPECTED_AGENTS:
+                self.assertFalse((agents / (name + ".toml")).exists())
+            self.assertEqual(unrelated.read_text(), "keep\n")
+
+    def test_readme_removal_deletes_repository_owned_legacy_profile_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            agents = home / ".codex/agents"
+            agents.mkdir(parents=True)
+            for name in EXPECTED_AGENTS:
+                (agents / (name + ".toml")).symlink_to(CODEX_AGENTS / (name + ".toml"))
+            unrelated = agents / "user-owned.toml"
+            unrelated.write_text("keep\n")
+
+            result = self.run_readme_removal(home, root / "project")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in EXPECTED_AGENTS:
+                self.assertFalse((agents / (name + ".toml")).exists())
+            self.assertEqual(unrelated.read_text(), "keep\n")
+
+    def test_readme_removal_preserves_drifted_and_unowned_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            agents = home / ".codex/agents"
+            agents.mkdir(parents=True)
+            drifted = agents / "openspec-explore-proposal.toml"
+            drifted.write_text("drifted\n")
+            other_target = root / "other.toml"
+            other_target.write_text("other\n")
+            unowned = agents / "openspec-proposal-reviewer.toml"
+            unowned.symlink_to(other_target)
+
+            result = self.run_readme_removal(home, root / "project")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(drifted.read_text(), "drifted\n")
+            self.assertTrue(unowned.is_symlink())
+            self.assertEqual(unowned.resolve(), other_target.resolve())
+
+    def test_readme_removal_is_limited_to_verified_symlinks_and_owned_copies(self):
         content = self.read_document(README)
         self.assertIn("## Removal", content)
         removal = content.split("## Removal", 1)[1]
-        for required in ("-L", "readlink", "unlink", ".codex/skills", ".codex/agents", ".agents/shared", ".agents/team"):
+        for required in ("-L", "readlink", "unlink", "cmp", ".codex/skills", ".codex/agents",
+                         ".agents/shared", ".agents/team"):
             with self.subTest(required=required):
                 self.assertIn(required, removal)
         self.assertNotIn("rm -rf", removal)

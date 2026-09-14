@@ -10,24 +10,28 @@ description: Use when coordinating an OpenSpec development team workflow from ex
 Coordinate the serial OpenSpec team workflow. OpenSpec is the sole lifecycle
 and implementation source of truth; this skill adds mechanical routing, a Human
 Gate, validated handoffs, and recovery, not a parallel lifecycle.
-The Orchestrator must not implement, review, or publish. It never receives the
-full conversation and never substitutes itself for a specialist.
+The Orchestrator owns request provenance, serial dispatch, handoff persistence,
+and escalation. The Orchestrator must not implement, review, or publish; it never
+receives the full conversation or substitutes itself for a specialist.
 
 Resolve three roots before routing. `SKILL_DIR` is the concrete directory that
-contains this `SKILL.md` after resolving an installed symlink. `TEAM_ROOT` is
-two directories above `SKILL_DIR`. `PROJECT_ROOT` is the target project's Git
-root. The `python3` resolved from `PATH` must be Python 3.11+ with `tomllib`.
+contains this `SKILL.md` after resolving an installed symlink; `TEAM_ROOT` is two
+directories above `SKILL_DIR`; `PROJECT_ROOT` is the target project's Git root.
+The `python3` resolved from `PATH` must be Python 3.11+ with `tomllib`.
 
-Read each canonical contract from its owning root:
+Load canonical references operation-specific, not all at startup. Read only
+the sections needed for the current operation:
 
-- `$SKILL_DIR/references/state-machine.md`
-- `$TEAM_ROOT/agents/shared/workflow-policy.md`
-- `$TEAM_ROOT/agents/shared/handoff-contract.md`
-- `$TEAM_ROOT/agents/team/orchestrator.md`
-- `$PROJECT_ROOT/.agents/project.md`
+- `$SKILL_DIR/references/state-machine.md` is the canonical reference for routing and transition decisions.
+- `$TEAM_ROOT/agents/shared/workflow-policy.md` is the canonical reference for workflow-boundary checks.
+- `$TEAM_ROOT/agents/shared/handoff-contract.md` is the canonical reference for handoff validation.
+- Load `$PROJECT_ROOT/.agents/project.md` before project-bound operations.
 
-Work serially on `main`. Never create a branch or worktree, and never hard-code
-an OpenSpec Change directory.
+The Orchestrator writes only request/approval/run evidence and accepted handoffs under `.agents`.
+Escalate Human Gates, invalid scope, third blocking findings, dirty tracked state,
+unresolved blockers, ambiguous owners, or illegal transitions instead of guessing.
+Work serially on `main`; never create a branch or worktree, and never hard-code an
+OpenSpec Change directory.
 
 ## Owner map
 
@@ -120,7 +124,7 @@ The second command revalidates, persists the accepted handoff, and updates
 state atomically. A rejected handoff is not persisted and leaves state
 unchanged; report `BLOCKED` with validation evidence instead of guessing or
 dispatching another owner. Never accept a stale attempt. For `STEP_PASS`, use
-the three-command Publishing sequence below instead.
+the three-command sequence in the Publishing reference below instead.
 For `PROPOSAL_CHANGED`, use `STATUS=PASS` and require `SCOPE` to be
 `WITHIN_APPROVED_SCOPE` or `OUTSIDE_APPROVED_SCOPE`; the latter invalidates
 approval and returns to Explore. `NEEDS_HUMAN` uses the same event and status,
@@ -166,40 +170,31 @@ second enters `PUBLISHING`.
 
 ## Publishing and recovery
 
-Treat `PUBLISHING` as receipt-based recovery, never as replay. Reconcile the
-actual Git/OpenSpec/Linear state before recording or continuing each receipt,
-using the Audit binding and `PUBLISH_STEP_RECEIPTS`. Continue only the first incomplete step
-in `PREFLIGHT -> ARCHIVE -> VALIDATE -> FINAL_COMMIT -> PUSH -> LINEAR_SYNC ->
-COMPLETE`; never repeat a proven external effect.
-
-Only `openspec-archivist-publisher` performs a step. It returns a current-attempt
-handoff whose final receipt is the authoritative receipt payload: step, result
-path and digest, time, input digests, and applicable `ARCHIVE_DIGEST` or
-`FINAL_SHA`. The Orchestrator uses that same candidate in this exact order:
-
-```text
-python3 "$TEAM_ROOT/scripts/workflow-state.py" validate-handoff --state <state> --handoff <candidate> --event STEP_PASS
-python3 "$TEAM_ROOT/scripts/workflow-state.py" publish-receipt --state <state> --handoff <candidate> --step <step> --result-file <file> [--archive-digest <digest>] [--final-sha <sha>]
-python3 "$TEAM_ROOT/scripts/workflow-state.py" transition --state <state> --handoff <candidate> --event STEP_PASS
-```
-
-`publish-receipt` verifies and persists the candidate's exact final receipt but
-never changes lifecycle state. Only `transition` advances the event;
-`COMPLETE` becomes `DONE` there. Exact replays are idempotent, while a skipped
-or altered receipt is rejected without mutation.
-
-For unauthorized preflight, accept only a `BLOCKED` handoff at `PREFLIGHT` with
-the unchanged receipt list; no `ARCHIVE_DIGEST` exists yet. Do not record a
-receipt or send `STEP_PASS`. Other invalid authorization or bindings are also
-`BLOCKED`. A blocked `ARCHIVE` needs no digest before its receipt exists; after
-the archive receipt, require its matching digest and the first incomplete step.
-Archive output containing business code invalidates the Audit PASS
-and requires `AUDITING` again.
+Only `openspec-archivist-publisher` may publish after explicit authorization
+and valid Audit bindings. For `PUBLISHING` or publishing-specific handoff
+validation, read [Publishing steps](references/state-machine.md#publishing-steps)
+before taking the next step; earlier phases do not load that section.
+That reference owns receipt reconciliation and the validate/record/transition
+sequence. Invalid authorization or bindings are `BLOCKED`; continue only the
+first incomplete verified step and never repeat a proven external effect.
+Archive output containing business code invalidates Audit PASS and requires
+`AUDITING` again.
 
 ## Smoke
 
-`$openspec-dev-team smoke` is a no-write diagnostic. It uses supplied fixture artifacts
-and sequentially dispatches these five native agents in fresh context:
+`$openspec-dev-team smoke` is a no-write diagnostic. Before invoking it, prepare
+a disposable fixture project and a fresh temporary `CODEX_HOME` containing the
+skill symlink and five regular profile copies, then record `codex --version`.
+Run a fresh `codex exec --ephemeral --sandbox read-only --ignore-user-config`
+session (or an equivalent native fresh-session invocation) against that fixture.
+Snapshot fixture/project paths before and after. Specialist profiles may request
+`workspace-write`, so any attempted write or changed fixture/project path is a
+failure; do not infer isolation from parent sandbox inheritance.
+Populate `CODEX_HOME` with the skill symlink and `cp` copies of all five
+`profiles/codex/agents/*.toml` before starting the session.
+
+It uses supplied fixture artifacts and sequentially dispatches these five native
+agents in fresh context:
 
 1. `openspec-explore-proposal`
 2. `openspec-proposal-reviewer`
@@ -211,9 +206,10 @@ Constrain every role to inspection and synthetic handoff generation. For each
 fixture state, validate the current-attempt result with `validate-handoff` and
 its exact `ATTEMPT_ID`. Then submit a copy with a stale ATTEMPT_ID: validation
 must return nonzero and the fixture and project must remain unchanged. Dispatch
-Publisher for unauthorized preflight only; it must return `BLOCKED` and do not
-run archive, commit, push, or Linear actions.
+Publisher for unauthorized preflight only; it must return
+`STATUS=BLOCKED`, `PUBLISH_STEP=PREFLIGHT`, `NEXT_STATE=BLOCKED`,
+`PUBLISH_STEP_RECEIPTS=[]`, and `ARCHIVE_DIGEST=null`, then do not run archive,
+commit, push, or Linear actions. Capture the dispatch transcript, validation
+output, and stale-rejection result outside the repository.
 
-Smoke must not mutate lifecycle or external state: do not run `init`, `approve`,
-`dispatch`, `authorize-publish`, `transition`, or `publish-receipt`; do not write artifacts or invoke OpenSpec
-archive. Any attempted write fails the smoke diagnostic.
+Smoke must not mutate lifecycle or external state: do not run `init`, `approve`, `dispatch`, `authorize-publish`, `transition`, or `publish-receipt`; do not write artifacts, invoke OpenSpec archive, or allow any attempted write.

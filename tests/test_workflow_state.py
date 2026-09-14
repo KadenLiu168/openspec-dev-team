@@ -101,7 +101,8 @@ class WorkflowStateHandoffTests(unittest.TestCase):
             "CHANGE": None, "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": None,
             "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
             "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None, "BASE_SHA": None,
-            "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
+            "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "ARCHIVE_DIGEST": None,
+            "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
             "OWNER": "Explore / Proposal",
             "EXPLORE_ARTIFACT": str(self.explore_path),
             "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
@@ -489,7 +490,8 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
             "CHANGE": None, "REQUEST_ARTIFACT": "request.md", "APPROVAL_ARTIFACT": None,
             "SUMMARY": "summary", "EVIDENCE": [], "BLOCKERS": [], "ARTIFACTS": [],
             "PROPOSAL_DIGEST": None, "PROGRESS_DIGEST": None, "BASE_SHA": None,
-            "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
+            "HEAD_SHA": None, "PUBLISH_STEP_RECEIPTS": [], "ARCHIVE_DIGEST": None,
+            "NEXT_STATE": "AWAITING_EXPLORE_APPROVAL",
             "OWNER": "Explore / Proposal",
             "EXPLORE_ARTIFACT": str(self.explore_path),
             "EXPLORE_DIGEST": hashlib.sha256(self.explore_path.read_bytes()).hexdigest(),
@@ -567,6 +569,31 @@ class WorkflowStateFixRegressionTests(unittest.TestCase):
         self.assertEqual(saved["STATE"], "BLOCKED")
         self.assertEqual(saved["RESUME_STATE"], "PUBLISHING")
         self.assertEqual(saved["PUBLISH_STEP_RECEIPTS"], [])
+
+        self.write_state(
+            STATE="PUBLISHING", CHANGE="change", PROPOSAL_DIGEST="proposal",
+            PROGRESS_DIGEST="progress", BASE_SHA="base", HEAD_SHA="head",
+            APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP_RECEIPTS=[],
+        )
+        for digest in ("archive", "__missing__"):
+            with self.subTest(archive_digest=digest):
+                self.handoff(
+                    OWNER="Archivist / Publisher", STATUS="BLOCKED", CHANGE="change",
+                    PROPOSAL_DIGEST="proposal", PROGRESS_DIGEST="progress", BASE_SHA="base",
+                    HEAD_SHA="head", APPROVAL_ARTIFACT="approval.json", PUBLISH_STEP="PREFLIGHT",
+                    ARCHIVE_DIGEST=None, PUBLISH_STEP_RECEIPTS=[], NEXT_STATE="BLOCKED",
+                    BLOCKERS=["publish authorization missing"],
+                )
+                payload = json.loads(self.handoff_path.read_text(encoding="utf-8"))
+                if digest == "__missing__":
+                    del payload["ARCHIVE_DIGEST"]
+                else:
+                    payload["ARCHIVE_DIGEST"] = digest
+                self.handoff_path.write_text(json.dumps(payload), encoding="utf-8")
+                before = self.state_path.read_bytes()
+                result = self.transition("BLOCKED")
+                self.assert_json_error_and_unchanged(result, before)
+                self.assertIn("ARCHIVE_DIGEST=null", json.loads(result.stderr)["error"])
 
     def test_publishing_blocked_progress_requires_next_step_and_archive_binding(self):
         preflight = {"STEP": "PREFLIGHT"}
@@ -915,7 +942,7 @@ class WorkflowStateFinalRegressionTests(unittest.TestCase):
             field: state.get(field) for field in (
                 "RUN_ID", "ATTEMPT_ID", "CHANGE", "REQUEST_ARTIFACT", "APPROVAL_ARTIFACT",
                 "APPROVAL_DIGEST", "PROPOSAL_DIGEST", "PROGRESS_DIGEST", "BASE_SHA", "HEAD_SHA",
-                "UNTRACKED_BASELINE", "PUBLISH_STEP_RECEIPTS",
+                "UNTRACKED_BASELINE", "PUBLISH_STEP_RECEIPTS", "ARCHIVE_DIGEST",
             )
         }
         payload.update(OWNER=owner, STATUS="PASS", NEXT_STATE=target,
