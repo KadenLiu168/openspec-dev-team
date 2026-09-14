@@ -1,316 +1,70 @@
-# AGENTS.md
-
-## 1. Project Context
-
-OpenSpec Dev Team 是一个基于 **Codex CLI** 的 OpenSpec 多 Agent 开发团队工具。
-
-当前目标：
-
-* 提供标准化的 Codex CLI Multi-Agent 软件开发流程。
-* 使用 OpenSpec 作为需求、设计、实施、验证的生命周期来源。
-* 通过多个职责明确的 Agent 协作，提高 AI 辅助开发质量。
-
-当前 MVP 范围：
-
-* Codex CLI only
-* OpenSpec workflow
-* Multi-agent development team
-
-非目标：
-
-* Claude Code adapter
-* Pi adapter
-* 通用 Agent Runtime
-* 多平台 Agent 协议
-
-## 2. Core Design Principles
-
-### Simplicity First
-
-优先选择简单、明确、可维护的设计。
-
-避免：
-
-* 为未来需求提前抽象
-* 不必要的平台兼容层
-* 复杂配置系统
-
-### Spec Driven Development
-
-OpenSpec 是项目生命周期唯一事实来源。
-
-所有重要修改必须：
-
-1. 明确 Change
-2. 生成 Proposal
-3. Review
-4. Apply
-5. Verify
-
-### Single Source of Truth
-
-Agent 配置必须保持单一来源。
-
-当前原则：
-
-```
-One Agent = One TOML File
-```
-
-不要引入：
-
-* TOML + Markdown 双配置
-* 重复 Agent 描述文件
-
-### Human Control
-
-关键阶段必须保留 Human Gate。
-
-Agent 不应：
-
-* 自动绕过审批
-* 自主扩大修改范围
-* 修改未授权内容
-
-## 3. Architecture Constraints
-
-当前架构：
-
-```
-Codex CLI
-    |
-    |
-OpenSpec Skill
-    |
-    |
-Agent Team
-    |
-    |
-Project Code
-```
-
-Agent 定义：
-
-```
-agents/
- ├── explore.toml
- ├── reviewer.toml
- ├── implementer.toml
- └── auditor.toml
-```
-
-每个 Agent TOML 必须包含：
-
-* name
-* description
-* model
-* reasoning_effort
-* sandbox
-* instructions
-
-## 4. Repository Structure
-
-MVP 推荐结构：
-
-```
-openspec-dev-team/
-
-├── agents/
-├── skills/
-├── templates/
-├── scripts/
-├── docs/
-└── README.md
-```
-
-禁止：
-
-* 为 Claude/Pi 提前增加目录
-* 保留未使用 adapter
-* 增加无实际用途的抽象层
-
-## 5. Development Guidelines
-
-修改代码前：
-
-1. 理解当前架构。
-2. 检查 OpenSpec Change。
-3. 明确修改范围。
-4. 评估是否影响 Agent workflow。
-
-代码修改原则：
-
-* 小步修改
-* 精准修改
-* 删除优先
-* 避免过度设计
-
-## 6. Change Rules
-
-每个功能修改必须对应一个 OpenSpec Change。
-
-Change 应包含：
-
-* Problem
-* Goal
-* Scope
-* Design
-* Acceptance Criteria
-
-不要：
-
-* 一个 Change 混合多个独立目标
-* 未经过 Proposal Review 直接实现
-
-## 7. Testing
-
-修改后必须验证：
-
-* Agent 配置是否可被 Codex CLI 加载
-* Skill 是否正常调用
-* Workflow 是否正常运行
-* README 与实际能力一致
-
-新增能力必须增加：
-
-* 测试
-* 示例
-* 使用说明
-
-## 8. Git Workflow
-
-原则：
-
-* main 分支作为唯一开发分支
-* 一个 Change 对应一次完整修改
-* 修改完成后提交清晰 Commit Message
-
-Commit 示例：
-
-```
-feat(agent): simplify agent configuration
-
-refactor(repo): remove unused profiles
-```
-
-## 9. Agent Workflow
-
-标准流程：
-
-```
-Request
-
-↓
-
-Explore Agent
-
-↓
-
-Human Approval
-
-↓
-
-Review Agent
-
-↓
-
-Implement Agent
-
-↓
-
-Audit Agent
-
-↓
-
-Archive
-```
-
-Agent 职责：
-
-### Explore
-
-负责：
-
-* 理解需求
-* 分析影响范围
-* 创建方案
-
-### Reviewer
-
-负责：
-
-* 挑战方案
-* 发现风险
-* 检查完整性
-
-### Implementer
-
-负责：
-
-* 根据批准方案修改代码
-* 保持修改范围
-
-### Auditor
-
-负责：
-
-* 验证实现
-* 检查回归问题
-
-## 10. Do Not
-
-禁止：
-
-* 为未来平台提前设计复杂抽象
-* 创建重复配置文件
-* 绕过 OpenSpec 流程
-* 未确认需求直接扩大范围
-* 修改与当前 Change 无关代码
-
-## 11. Common Commands
-
-安装：
-
-```
-./install.sh
-```
-
-项目初始化：
-
-```
-openspec-team init
-```
-
-运行检查：
-
-```
-./scripts/doctor.sh
-```
-
-## 12. Decision Records
-
-当前关键决策：
-
-### Agent Configuration
-
-采用：
-
-```
-Single TOML Agent Definition
-```
-
-原因：
-
-* 符合 Codex CLI 原生模式
-* 降低维护成本
-* 避免配置漂移
-
-### MVP Scope
-
-当前只支持：
-
-```
-Codex CLI + OpenSpec + Multi-Agent Workflow
-```
-
-未来扩展必须独立 Change 评估。
+# Repository Instructions
+
+## Project Scope
+
+本仓库是 **Codex CLI-only** 的 OpenSpec 多 Agent 开发团队工具。支持边界为：
+
+- Codex 原生 custom-agent profiles；
+- OpenSpec 驱动的需求、设计、实施和验证生命周期；
+- 在目标项目 `main` 分支上串行运行的五个 specialist profiles。
+
+五个 authored Codex profiles 位于 `profiles/codex/agents/`：
+
+- `openspec-explore-proposal.toml`
+- `openspec-proposal-reviewer.toml`
+- `openspec-apply-executor.toml`
+- `openspec-pre-archive-auditor.toml`
+- `openspec-archivist-publisher.toml`
+
+`profiles/pi/README.md` 和 `profiles/claude-code/README.md` 仅是
+**template-only platform mappings**，不表示本仓库支持 Pi、Claude Code adapter、
+通用 Agent runtime 或多平台 Agent 协议。
+
+## Stable Guardrails
+
+- OpenSpec artifacts 是生命周期和实现范围的事实来源。实质性修改必须对应一个经过审查和批准的 OpenSpec Change，并保持在其 Scope 内。
+- 保留 Human control：Agent 不得绕过 Human Gate、伪造授权、自动扩大范围，或替人作出需要人工决定的发布决策。
+- 修改前先阅读相关 Change 和 canonical source；只编辑明确授权的路径，不要顺手修改无关的 profile、skill、script、test、spec 或 archived Change。
+- 所有工作在目标项目的 `main` 上串行进行；不要创建 branch 或 worktree。
+- 保留既有 tracked changes 和非忽略 untracked files；不要覆盖、删除或提交不属于当前 allowlist 的内容。
+- Git/runtime 安全优先：不要使用 `git add .`、`git add -A`、`reset`、`clean`、force-push 或 history rewrite；不要用 pull、merge 或 rebase 掩盖异常。遇到 dirty state、非法路由、未解决 blocker 或授权异常时应停下并升级处理。
+- 不手工绕过可执行的 state、handoff、digest 或 receipt 校验；运行时事实由其 canonical owner 维护。
+
+## Canonical Sources by Concern
+
+| Concern | Canonical source |
+| --- | --- |
+| Specialist identity, model, sandbox and role instructions | `profiles/codex/agents/*.toml` |
+| Logical `READ`/`WRITE` capability mapping | `profiles/codex/model-map.md` |
+| Orchestration entry point and dispatch behavior | `skills/openspec-dev-team/SKILL.md` |
+| State/event routing and publishing-step reference | `skills/openspec-dev-team/references/state-machine.md` |
+| Cross-Agent workflow boundaries | `agents/shared/workflow-policy.md` |
+| Handoff fields, digests and acceptance rules | `agents/shared/handoff-contract.md` |
+| Executable state and handoff enforcement | `scripts/workflow-state.py` |
+| Installation and project bootstrap behavior | `README.md`, `scripts/link-project.sh`, `templates/project.md` |
+| Global/project diagnostics | `scripts/doctor.sh` |
+| Requirements, design, tasks and lifecycle configuration | `openspec/config.yaml`, `openspec/specs/`, `openspec/changes/` |
+| Regression and contract evidence | `tests/` |
+| Unverified platform mappings (template-only) | `profiles/pi/README.md`, `profiles/claude-code/README.md` |
+
+The five TOMLs under `profiles/codex/agents/` are the authored specialist
+sources. Installed copies and project-owned `.agents` configuration are
+deployment/project data, not additional role definitions. Update the relevant
+canonical source instead of copying its runtime facts into this file.
+
+## Change Boundaries
+
+本文件是稳定的 repository guardrail 和 navigation layer，不是完整的 architecture
+specification、role contract、state-machine reference、installation manual 或 CLI
+reference。详细的 Agent instructions、state transitions、handoff rules、bootstrap
+procedures 和 executable validation 必须留在上表所列的 owner 中。
+
+本仓库当前 Change 的实现应保持最小、可审查且可回滚；不要为未来平台、配置格式或
+runtime 引入未获批准的 adapter、registry、generated file 或 dependency。外部项目
+管理系统不属于本仓库 Change 的默认修改范围。
+
+## Verification Expectations
+
+完成修改后，确认所有新引用的 authored paths 仍存在，运行适用的 `tests/`、
+`scripts/doctor.sh` 和 OpenSpec strict validation，并检查最终 diff 只包含批准范围内的
+文件。文档对齐不得通过修改测试或运行时行为来“修复”验证结果。
